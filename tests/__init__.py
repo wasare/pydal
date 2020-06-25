@@ -1,6 +1,6 @@
-from ._adapt import NOSQL
+from ._adapt import IS_NOSQL
 
-if NOSQL:
+if IS_NOSQL:
     from .nosql import *
 else:
     from .sql import *
@@ -11,3 +11,6 @@ from .caching import TestCache
 from .smart_query import *
 from .base import *
 from .contribs import *
+from .validators import *
+from .is_url_validators import *
+from .restapi import *
