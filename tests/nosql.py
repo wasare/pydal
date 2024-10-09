@@ -4,18 +4,20 @@
 """
 
 from __future__ import print_function
-import sys
-import os
-import glob
-import datetime
-from ._compat import unittest
 
-from pydal._compat import PY2, basestring, StringIO, to_bytes, long
+import datetime
+import glob
+import os
+import sys
+
 from pydal import DAL, Field
-from pydal.objects import Table, Query, Expression
-from pydal.helpers.classes import SQLALL, OpRow
+from pydal._compat import PY2, StringIO, basestring, long, to_bytes
 from pydal.exceptions import NotOnNOSQLError
-from ._adapt import DEFAULT_URI, IS_IMAP, drop, IS_GAE, IS_MONGODB, _quote
+from pydal.helpers.classes import SQLALL, OpRow
+from pydal.objects import Expression, Query, Table
+
+from ._adapt import DEFAULT_URI, IS_GAE, IS_IMAP, IS_MONGODB, _quote, drop
+from ._compat import unittest
 
 if IS_IMAP:
     from pydal.adapters import IMAPAdapter
@@ -90,8 +92,7 @@ def tearDownModule():
 
 @unittest.skipIf(not IS_MONGODB, "Skipping MongoDB Tests")
 class TestMongo(unittest.TestCase):
-    """ Tests specific to MongoDB,  error and side path exercisers, etc
-    """
+    """Tests specific to MongoDB,  error and side path exercisers, etc"""
 
     def testVersionCheck(self):
         driver_args = {"fake_version": "2.9 Phony"}
@@ -301,20 +302,19 @@ class TestFields(unittest.TestCase):
         # Check that Field names don't allow a unicode string
         non_valid_examples = non_valid_examples = [
             "ℙƴ☂ℌøἤ",
-            u"ℙƴ☂ℌøἤ",
-            u"àè",
-            u"ṧøмℯ",
-            u"тεṧт",
-            u"♥αłüℯṧ",
-            u"ℊεᾔ℮яαт℮∂",
-            u"♭ƴ",
-            u"ᾔ☤ρℌℓ☺ḓ",
+            "ℙƴ☂ℌøἤ",
+            "àè",
+            "ṧøмℯ",
+            "тεṧт",
+            "♥αłüℯṧ",
+            "ℊεᾔ℮яαт℮∂",
+            "♭ƴ",
+            "ᾔ☤ρℌℓ☺ḓ",
         ]
         for a in non_valid_examples:
             self.assertRaises(SyntaxError, Field, a, "string")
 
     def testFieldTypes(self):
-
         # Check that string, and password default length is 512
         for typ in ["string", "password"]:
             self.assertTrue(
@@ -335,7 +335,6 @@ class TestFields(unittest.TestCase):
         )
 
     def testFieldLabels(self):
-
         # Check that a label is successfully built from the supplied fieldname
         self.assertTrue(
             Field("abc", "string").label == "Abc", "Label built is incorrect"
@@ -345,7 +344,6 @@ class TestFields(unittest.TestCase):
         )
 
     def testFieldFormatters(self):  # Formatter should be called Validator
-
         # Test the default formatters
         for typ in ALLOWED_DATATYPES:
             f = Field("abc", typ)
@@ -505,14 +503,14 @@ class TestTables(unittest.TestCase):
         # Check that Table names don't allow a unicode string
         non_valid_examples = [
             "ℙƴ☂ℌøἤ",
-            u"ℙƴ☂ℌøἤ",
-            u"àè",
-            u"ṧøмℯ",
-            u"тεṧт",
-            u"♥αłüℯṧ",
-            u"ℊεᾔ℮яαт℮∂",
-            u"♭ƴ",
-            u"ᾔ☤ρℌℓ☺ḓ",
+            "ℙƴ☂ℌøἤ",
+            "àè",
+            "ṧøмℯ",
+            "тεṧт",
+            "♥αłüℯṧ",
+            "ℊεᾔ℮яαт℮∂",
+            "♭ƴ",
+            "ᾔ☤ρℌℓ☺ḓ",
         ]
         for a in non_valid_examples:
             self.assertRaises(SyntaxError, Table, None, a)
@@ -531,7 +529,6 @@ class TestAll(unittest.TestCase):
 @unittest.skipIf(IS_IMAP, "Skip IMAP")
 class TestTable(unittest.TestCase):
     def testTableCreation(self):
-
         # Check for error when not passing type other than Field or Table
 
         self.assertRaises(SyntaxError, Table, None, "test", None)
@@ -1235,7 +1232,7 @@ class TestExpressions(unittest.TestCase):
             self.assertEqual(db(db.tt.cc == "cc11").count(), 1)
             self.assertEqual(db(db.tt.aa == 3).count(), 1)
 
-            # test comparsion expression based count
+            # test comparison expression based count
             self.assertEqual(db(db.tt.aa != db.tt.aa).count(), 0)
             self.assertEqual(db(db.tt.aa == db.tt.aa).count(), 3)
 
@@ -1597,7 +1594,7 @@ class TestReference(unittest.TestCase):
             (False, "CASCADE"),
             (False, "SET NULL"),
         )
-        for (b, ondelete) in scenarios:
+        for b, ondelete in scenarios:
             db = DAL(DEFAULT_URI, check_reserved=["all"], bigint_id=b)
             db.define_table(
                 "tt", Field("name"), Field("aa", "reference tt", ondelete=ondelete)
@@ -1921,7 +1918,9 @@ class TestSelectAsDict(unittest.TestCase):
     def testSelect(self):
         db = DAL(DEFAULT_URI, check_reserved=["all"])
         db.define_table(
-            "a_table", Field("b_field"), Field("a_field"),
+            "a_table",
+            Field("b_field"),
+            Field("a_field"),
         )
         db.a_table.insert(a_field="aa1", b_field="bb1")
         rtn = (
@@ -2219,7 +2218,15 @@ class TestRNameFields(unittest.TestCase):
             "tt",
             Field("aa", "datetime", default=datetime.datetime.today(), rname=rname),
         )
-        t0 = datetime.datetime(1971, 12, 21, 10, 30, 55, 0,)
+        t0 = datetime.datetime(
+            1971,
+            12,
+            21,
+            10,
+            30,
+            55,
+            0,
+        )
         id = db.tt.insert(aa=t0)
         self.assertEqual(db().select(db.tt.aa)[0].aa, t0)
 
@@ -2415,7 +2422,6 @@ class TestRNameFields(unittest.TestCase):
 
 @unittest.skipIf(IS_IMAP, "TODO: IMAP test")
 class TestQuoting(unittest.TestCase):
-
     # tests for case sensitivity
     def testCase(self):
         return
@@ -2449,7 +2455,6 @@ class TestQuoting(unittest.TestCase):
         db.close()
 
     def testPKFK(self):
-
         # test primary keys
 
         db = DAL(DEFAULT_URI, check_reserved=["all"], ignore_field_case=False)
@@ -2638,7 +2643,9 @@ class TestLazy(unittest.TestCase):
         db = DAL(DEFAULT_URI, lazy_tables=True)
         db.define_table("tt", Field("value", "integer"))
         db.define_table(
-            "ttt", Field("value", "integer"), Field("tt_id", "reference tt"),
+            "ttt",
+            Field("value", "integer"),
+            Field("tt_id", "reference tt"),
         )
         # Force table definition
         db.ttt.value.writable = False

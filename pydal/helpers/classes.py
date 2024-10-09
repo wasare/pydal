@@ -8,15 +8,15 @@ import traceback
 
 from .._compat import (
     PY2,
-    exists,
     copyreg,
+    exists,
     implements_bool,
+    iteritems,
     iterkeys,
     itervalues,
-    iteritems,
     long,
+    to_bytes,
 )
-from .._compat import to_bytes
 from .._globals import THREAD_LOCAL
 from .serializers import serializers
 
@@ -414,6 +414,9 @@ class FakeCursor(object):
     def __setattr__(self, attr, value):
         self.warn_bad_usage(attr)
 
+    def close(self):
+        return
+
 
 class NullCursor(FakeCursor):
     lastrowid = 1
@@ -481,7 +484,6 @@ class TimingHandler(ExecutionHandler):
 
 
 class DatabaseStoredFile:
-
     web2py_filesystems = set()
 
     def escape(self, obj):
@@ -494,7 +496,11 @@ class DatabaseStoredFile:
                 raise NotImplementedError(
                     "DatabaseStoredFile only supported by mysql, potresql, sqlite"
                 )
-            sql = "CREATE TABLE IF NOT EXISTS web2py_filesystem (path VARCHAR(255), content BLOB, PRIMARY KEY(path));"
+            blobType = "BYTEA" if db._adapter.dbengine == "postgres" else "BLOB"
+            sql = (
+                "CREATE TABLE IF NOT EXISTS web2py_filesystem (path VARCHAR(255), content %(blobType)s, PRIMARY KEY(path));"
+                % {"blobType": blobType}
+            )
             if db._adapter.dbengine == "mysql":
                 sql = sql[:-1] + " ENGINE=InnoDB;"
             db.executesql(sql)
@@ -537,7 +543,7 @@ class DatabaseStoredFile:
         return self.read(bytes)
 
     def readline(self):
-        i = self.data.find("\n", self.p) + 1
+        i = self.data.find(b"\n", self.p) + 1
         if i > 0:
             data, self.p = self.data[self.p : i], i
         else:
@@ -552,8 +558,12 @@ class DatabaseStoredFile:
             self.db.executesql(
                 "DELETE FROM web2py_filesystem WHERE path='%s'" % self.filename
             )
-            query = "INSERT INTO web2py_filesystem(path,content) VALUES ('%s','%s')"
-            args = (to_bytes(self.filename), self.data)
+            placeholder = "?" if self.db._adapter.dbengine == "sqlite" else "%s"
+            query = (
+                "INSERT INTO web2py_filesystem(path,content) VALUES (%(placeholder)s, %(placeholder)s)"
+                % {"placeholder": placeholder}
+            )
+            args = (self.filename, self.data)
             self.db.executesql(query, args)
             self.db.commit()
             self.db = None

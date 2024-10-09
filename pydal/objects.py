@@ -8,69 +8,72 @@ import copy
 import csv
 import datetime
 import decimal
+import io
 import os
+import re
 import shutil
 import sys
 import types
-import re
 from collections import OrderedDict
+from io import TextIOWrapper
+
 from ._compat import (
     PY2,
-    StringIO,
     BytesIO,
-    pjoin,
+    StringIO,
+    basestring,
+    copyreg,
     exists,
     hashlib_md5,
-    basestring,
-    iteritems,
-    xrange,
-    implements_iterator,
     implements_bool,
-    copyreg,
+    implements_iterator,
+    iteritems,
+    long,
+    pjoin,
     reduce,
+    text_type,
     to_bytes,
     to_native,
     to_unicode,
-    long,
-    text_type,
+    xrange,
 )
-from ._globals import DEFAULT, IDENTITY, AND, OR
 from ._gae import Key
-from .exceptions import NotFoundException, NotAuthorizedException
-from .helpers.regex import (
-    REGEX_TABLE_DOT_FIELD,
-    REGEX_ALPHANUMERIC,
-    REGEX_PYTHON_KEYWORDS,
-    REGEX_UPLOAD_EXTENSION,
-    REGEX_UPLOAD_PATTERN,
-    REGEX_UPLOAD_CLEANUP,
-    REGEX_VALID_TB_FLD,
-    REGEX_TYPE,
-    REGEX_TABLE_DOT_FIELD_OPTIONAL_QUOTES,
-)
+from ._globals import AND, DEFAULT, IDENTITY, OR
+from .exceptions import NotAuthorizedException, NotFoundException
 from .helpers.classes import (
-    Reference,
-    MethodAdder,
-    SQLCallableList,
     SQLALL,
-    Serializable,
     BasicStorage,
-    SQLCustomType,
+    MethodAdder,
     OpRow,
+    Reference,
+    Serializable,
+    SQLCallableList,
+    SQLCustomType,
     cachedprop,
 )
 from .helpers.methods import (
-    list_represent,
+    archive_record,
+    attempt_upload_on_insert,
+    attempt_upload_on_update,
     bar_decode_integer,
     bar_decode_string,
     bar_encode,
-    archive_record,
     cleanup,
-    use_common_filters,
-    attempt_upload_on_insert,
-    attempt_upload_on_update,
     delete_uploaded_files,
-    uuidstr
+    list_represent,
+    use_common_filters,
+    uuidstr,
+)
+from .helpers.regex import (
+    REGEX_ALPHANUMERIC,
+    REGEX_PYTHON_KEYWORDS,
+    REGEX_TABLE_DOT_FIELD,
+    REGEX_TABLE_DOT_FIELD_OPTIONAL_QUOTES,
+    REGEX_TYPE,
+    REGEX_UPLOAD_CLEANUP,
+    REGEX_UPLOAD_EXTENSION,
+    REGEX_UPLOAD_PATTERN,
+    REGEX_VALID_TB_FLD,
 )
 from .helpers.serializers import serializers
 from .utils import deprecated
@@ -82,19 +85,19 @@ DEFAULTLENGTH = {
     "string": 512,
     "password": 512,
     "upload": 512,
-    "text": 2 ** 15,
-    "blob": 2 ** 31,
+    "text": 2**15,
+    "blob": 2**31,
 }
 
 DEFAULT_REGEX = {
-    "id": "[1-9]\d*",
-    "decimal": "\d{1,10}\.\d{2}",
-    "integer": "[+-]?\d*",
-    "float": "[+-]?\d*(\.\d*)?",
-    "double": "[+-]?\d*(\.\d*)?",
-    "date": "\d{4}\-\d{2}\-\d{2}",
-    "time": "\d{2}\:\d{2}(\:\d{2}(\.\d*)?)?",
-    "datetime": "\d{4}\-\d{2}\-\d{2} \d{2}\:\d{2}(\:\d{2}(\.\d*)?)?",
+    "id": r"[1-9]\d*",
+    "decimal": r"\d{1,10}\.\d{2}",
+    "integer": r"[+-]?\d*",
+    "float": r"[+-]?\d*(\.\d*)?",
+    "double": r"[+-]?\d*(\.\d*)?",
+    "date": r"\d{4}\-\d{2}\-\d{2}",
+    "time": r"\d{2}\:\d{2}(\:\d{2}(\.\d*)?)?",
+    "datetime": r"\d{4}\-\d{2}\-\d{2} \d{2}\:\d{2}(\:\d{2}(\.\d*)?)?",
 }
 
 
@@ -535,7 +538,7 @@ class Table(Serializable, BasicStorage):
             archive_name,
             Field(current_record, field_type, label=current_record_label),
             *clones,
-            **d
+            **d,
         )
 
         self._before_update.append(
@@ -580,7 +583,6 @@ class Table(Serializable, BasicStorage):
                 field_type.startswith("reference ")
                 or field_type.startswith("list:reference ")
             ):
-
                 is_list = field_type[:15] == "list:reference "
                 if is_list:
                     ref = field_type[15:].strip()
@@ -626,17 +628,22 @@ class Table(Serializable, BasicStorage):
                 else:
                     self._referenced_by.append(referee)
 
-    def _filter_fields(self, record, id=False):
+    def _filter_fields(self, record, allow_id=False, writable_only=False):
         return dict(
             [
                 (k, v)
                 for (k, v) in iteritems(record)
-                if k in self.fields and (getattr(self, k).type != "id" or id)
+                # include fields if
+                if (
+                    k in self.fields
+                    and (allow_id or getattr(self, k).type != "id")  # are valid
+                    and (not writable_only or getattr(self, k).writable)  # are not ids
+                )  # are writable
             ]
         )
 
     def _build_query(self, key):
-        """ for keyed table only """
+        """for keyed table only"""
         query = None
         for k, v in iteritems(key):
             if k in self._primarykey:
@@ -759,7 +766,7 @@ class Table(Serializable, BasicStorage):
             elif isinstance(value, FieldMethod):
                 value.bind(self, str(key))
                 self._virtual_methods.append(value)
-            self.__dict__[str(key)] = value
+            object.__setattr__(self, str(key), value)
 
     def __setattr__(self, key, value):
         if key[:1] != "_" and key in self:
@@ -894,37 +901,85 @@ class Table(Serializable, BasicStorage):
                 f(row, ret)
         return ret
 
-    def _validate_fields(self, fields, defattr="default", id=None):
-        response = Row()
-        response.id, response.errors, new_fields = None, Row(), Row()
+    def _validate_fields(self, fields, record=None):
+        # do not change the input
+        fields = copy.copy(fields)
+        from .validators import CRYPT
+
+        # if a field it not writable or is an id or does not exist or
+        # it is a computed field, than it is invalid
+        valid_names = {
+            f.name for f in self if f.writable and f.type != "id" and not f.compute
+        }
+        errors = {}
+        new_fields = {}
+        for name in fields:
+            if name not in valid_names:
+                errors[name] = "invalid"
+        # temp files
+        temp_files = []
+        # loop over all expected fields
         for field in self:
-            # we validate even if not passed in case it is required
-            error = default = None
-            if not field.required and not field.compute:
-                default = getattr(field, defattr)
-                if callable(default):
-                    default = default()
-            if not field.compute:
-                value = fields.get(field.name, default)
-                value, error = field.validate(value, id)
+            # the field already resulted in an error, skip it
+            if field.name in errors:
+                continue
+            # if field is required but missing error
+            if record is None and field.required and not field.name in fields:
+                errors[field.name] = "required"
+                continue
+            # if we tried to submit **** as a password, ignore it (perhaps should be error)
+            if field.type == "password" and fields.get(field.name) == CRYPT.STARS:
+                continue
+            # if the field is of type upload but this is JSON content
+            if field.type == "upload" and isinstance(fields.get(field.name), dict):
+                filename = fields[field.name].get("filename")
+                content = fields[field.name].get("content")
+                if filename and content:
+                    file = io.BytesIO(base64.b64decode(content))
+                value = field.store(file, filename, field.uploadfolder)
+                fields[field.name] = value
+                if field.uploadfolder:
+                    temp_files.append(os.path.join(field.uploadfolder, value))
+            # if the field has a value use it
+            if field.name in fields:
+                id = record and record.id
+                value, error = field.validate(fields[field.name], record_id=id)
+            # this is an insert and no  value use the default value
+            elif not record and field.default:
+                value, error = field.default, None
+            # this is an update and no value use it
+            elif record and field.update:
+                value, error = field.update, None
+            else:
+                continue
+            # if error, record it
             if error:
-                response.errors[field.name] = "%s" % error
-            elif field.name in fields:
+                errors[field.name] = "%s" % error
+            # if no error and password
+            else:
+                # value can be a function if coming from default of update
+                if callable(value):
+                    value = value()
                 # only write if the field was passed and no error
                 new_fields[field.name] = value
-        return response, new_fields
+        if errors:
+            for path in temp_files:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        return errors, new_fields
 
     def validate_and_insert(self, **fields):
-        response, new_fields = self._validate_fields(fields, "default")
-        if not response.errors:
-            response.id = self.insert(**new_fields)
-        return response
+        errors, new_fields = self._validate_fields(fields)
+        record_id = self.insert(**new_fields) if not errors else None
+        return {"id": record_id, "errors": errors}
 
     def validate_and_update(self, _key, **fields):
         record = self(**_key) if isinstance(_key, dict) else self(_key)
-        response, new_fields = self._validate_fields(fields, "update", record.id)
-        #: do the update
-        if not response.errors and record:
+        errors, new_fields = self._validate_fields(fields, record)
+        updated = None
+        if not errors and record:
             if "_id" in self:
                 myset = self._db(self._id == record[self._id.name])
             else:
@@ -935,10 +990,8 @@ class Table(Serializable, BasicStorage):
                     else:
                         query = query & (getattr(self, key) == value)
                 myset = self._db(query)
-            response.updated = myset.update(**new_fields)
-        if record:
-            response.id = record.id
-        return response
+            updated = myset.update(**new_fields)
+        return {"id": record and record.id, "updated": updated, "errors": errors}
 
     def update_or_insert(self, _key=DEFAULT, **values):
         if _key is DEFAULT:
@@ -981,7 +1034,7 @@ class Table(Serializable, BasicStorage):
                 primary_keys = {}
                 for key in self._primarykey:
                     primary_keys[key] = getattr(record, key)
-                response.id = primary_keys
+                response["id"] = primary_keys
         else:
             response = self.validate_and_insert(**fields)
         return response
@@ -1015,7 +1068,7 @@ class Table(Serializable, BasicStorage):
         transform=None,
         validate=False,
         encoding="utf-8",
-        **kwargs
+        **kwargs,
     ):
         """
         Import records from csv file.
@@ -1217,8 +1270,8 @@ class Table(Serializable, BasicStorage):
     def create_index(self, name, *fields, **kwargs):
         return self._db._adapter.create_index(self, name, *fields, **kwargs)
 
-    def drop_index(self, name):
-        return self._db._adapter.drop_index(self, name)
+    def drop_index(self, name, if_exists=False):
+        return self._db._adapter.drop_index(self, name, if_exists)
 
 
 class Select(BasicStorage):
@@ -1238,6 +1291,7 @@ class Select(BasicStorage):
         self.virtualfields = []
         self._sql_cache = None
         self._colnames_cache = None
+        self._cte_recursive = None
         fieldcheck = set()
 
         for item in fields:
@@ -1317,13 +1371,15 @@ class Select(BasicStorage):
             raise SyntaxError("Subselect must be aliased for use in a JOIN")
         return Expression(self._db, self._db._adapter.dialect.on, self, query)
 
-    def _compile(self, outer_scoped=[], with_alias=False):
+    def _compile(self, outer_scoped=[], with_alias=False, cte_collector=None):
         if not self._correlated:
             outer_scoped = []
         if outer_scoped or not self._sql_cache:
             adapter = self._db._adapter
             attributes = self._attributes.copy()
             attributes["outer_scoped"] = outer_scoped
+            attributes["cte_collector"] = cte_collector
+            attributes.pop("cte", None)
             colnames, sql = adapter._select_wcols(
                 self._query, self._qfields, **attributes
             )
@@ -1337,9 +1393,57 @@ class Select(BasicStorage):
             sql = self._db._adapter.dialect.alias(sql, self._tablename)
         return colnames, sql
 
+    def union(self, recursive, union_type="UNION"):
+        if callable(recursive):
+            recursive = recursive(self)
+        if not isinstance(recursive, (list, tuple)):
+            recursive = [recursive]
+        if not self._cte_recursive:
+            self._cte_recursive = []
+        self._cte_recursive.extend([[union_type, r] for r in recursive])
+        return self
+
+    def union_all(self, recursive):
+        return self.union(recursive, "UNION ALL")
+
+    def cte(self, cte_collector):
+        if not self._tablename:
+            raise SyntaxError("cte must be aliased for use in a query/select")
+        if cte_collector:
+            if self._tablename in cte_collector["seen"]:
+                return
+            else:
+                # must be here to prevent infinite recursion
+                cte_collector["seen"].add(self._tablename)
+        colnames, sql = self._compile(cte_collector=cte_collector)
+        sql = sql[:-1]
+        # sql_fields = ", ".join(adapter._geoexpand(x, {}) for x in self._qfields)
+
+        sql_fields = ", ".join(
+            [
+                getattr(f, "alias", None) or getattr(f, "name", None) or str(f)
+                for f in self._qfields
+            ]
+        )
+        recursive = self._cte_recursive
+        if recursive:
+            for r in recursive:
+                if isinstance(r[1], self.__class__):
+                    _, r_sql = r[1]._compile(cte_collector=cte_collector)
+                    r[1] = r_sql[:-1]
+        sql = self._db._adapter.dialect.cte(self._tablename, sql_fields, sql, recursive)
+        if cte_collector:
+            cte_collector["stack"].append(sql)
+            # cte_collector['seen'].add(self._tablename) - see above
+            if not cte_collector["is_recursive"]:
+                cte_collector["is_recursive"] = recursive and True or False
+        return sql
+
     def query_name(self, outer_scoped=[]):
         if self._tablename is None:
-            raise SyntaxError("Subselect must be aliased for use in a JOIN")
+            raise SyntaxError("Subselect/cte must be aliased for use in a JOIN")
+        if self._attributes.get("cte"):
+            return (self.sql_shortref,)
         colnames, sql = self._compile(outer_scoped, True)
         # This method should also return list of placeholder values
         # in the future
@@ -1348,7 +1452,7 @@ class Select(BasicStorage):
     @property
     def sql_shortref(self):
         if self._tablename is None:
-            raise SyntaxError("Subselect must be aliased for use in a JOIN")
+            raise SyntaxError("Subselect/cte must be aliased for use in a JOIN")
         return self._db._adapter.dialect.quote(self._tablename)
 
     def _filter_fields(self, record, id=False):
@@ -1360,6 +1464,10 @@ class Select(BasicStorage):
             ]
         )
 
+    @property
+    def is_cte(self):
+        return self._attributes.get("cte")
+
 
 def _expression_wrap(wrapper):
     def wrap(self, *args, **kwargs):
@@ -1370,6 +1478,8 @@ def _expression_wrap(wrapper):
 
 class Expression(object):
     _dialect_expressions_ = {}
+
+    __hash__ = object.__hash__
 
     def __new__(cls, *args, **kwargs):
         for name, wrapper in iteritems(cls._dialect_expressions_):
@@ -1499,6 +1609,13 @@ class Expression(object):
     def __add__(self, other):
         return Expression(self.db, self._dialect.add, self, other, self.type)
 
+    def __radd__(self, other):
+        if not hasattr(other, "type"):
+            if isinstance(other, str):
+                other = self._dialect.quote(other)
+            other = Expression(self.db, other, type=self.type)
+        return Expression(self.db, self._dialect.add, other, self, self.type)
+
     def __sub__(self, other):
         if self.type in ("integer", "bigint"):
             result_type = "integer"
@@ -1547,8 +1664,10 @@ class Expression(object):
     def ilike(self, value, escape=None):
         return self.like(value, case_sensitive=False, escape=escape)
 
-    def regexp(self, value):
-        return Query(self.db, self._dialect.regexp, self, value)
+    def regexp(self, value, match_parameter=None):
+        return Query(
+            self.db, self._dialect.regexp, self, value, match_parameter=match_parameter
+        )
 
     def belongs(self, *value, **kwattr):
         """
@@ -1619,7 +1738,7 @@ class Expression(object):
 
     def with_alias(self, alias):
         return Expression(self.db, self._dialect._as, self, alias, self.type)
-    
+
     @property
     def alias(self):
         if self.op == self._dialect._as:
@@ -1838,7 +1957,6 @@ class FieldMethod(object):
 
 @implements_bool
 class Field(Expression, Serializable):
-
     Virtual = FieldVirtual
     Method = FieldMethod
     Lazy = FieldMethod  # for backward compatibility
@@ -1882,6 +2000,7 @@ class Field(Expression, Serializable):
         required=False,
         requires=DEFAULT,
         ondelete="CASCADE",
+        onupdate="CASCADE",
         notnull=False,
         unique=False,
         uploadfield=True,
@@ -1911,7 +2030,7 @@ class Field(Expression, Serializable):
         custom_qualifier=None,
         map_none=None,
         rname=None,
-        **others
+        **others,
     ):
         self._db = self.db = None  # both for backward compatibility
         self.table = self._table = None
@@ -1946,6 +2065,7 @@ class Field(Expression, Serializable):
         self.default = default if default is not DEFAULT else (update or None)
         self.required = required  # is this field required
         self.ondelete = ondelete.upper()  # this is for reference fields only
+        self.onupdate = onupdate.upper()  # this is for reference fields only
         self.notnull = notnull
         self.unique = unique
         # split to deal with decimal(,)
@@ -2031,12 +2151,10 @@ class Field(Expression, Serializable):
         filename = os.path.basename(filename.replace("/", os.sep).replace("\\", os.sep))
         m = re.search(REGEX_UPLOAD_EXTENSION, filename)
         extension = m and m.group(1) or "txt"
-        uuid_key = uuidstr().replace("-", "")[-16:]
-        encoded_filename = to_native(base64.b16encode(to_bytes(filename)).lower())
-        # Fields that are not bound to a table use "tmp" as the table name
-        tablename = getattr(self, "_tablename", "tmp")
+        uuid_key = self._db.uuid().replace("-", "")[-16:] if self._db else uuidstr()
+        encoded_filename = to_native(base64.urlsafe_b64encode(to_bytes(filename)))
         newfilename = "%s.%s.%s.%s" % (
-            tablename,
+            getattr(self, "_tablename", "no_table"),
             self.name,
             uuid_key,
             encoded_filename,
@@ -2060,7 +2178,7 @@ class Field(Expression, Serializable):
                     pass
                 elif self.uploadfolder:
                     path = self.uploadfolder
-                elif self.db is not None and self.db._adapter.folder:
+                elif self.db._adapter.folder:
                     path = pjoin(self.db._adapter.folder, "..", "uploads")
                 else:
                     raise RuntimeError(
@@ -2070,7 +2188,7 @@ class Field(Expression, Serializable):
                     if self.uploadfs:
                         raise RuntimeError("not supported")
                     path = pjoin(
-                        path, "%s.%s" % (tablename, self.name), uuid_key[:2]
+                        path, "%s.%s" % (self._tablename, self.name), uuid_key[:2]
                     )
                 if not exists(path):
                     os.makedirs(path)
@@ -2129,13 +2247,17 @@ class Field(Expression, Serializable):
         self_uploadfield = self.uploadfield
         if self.custom_retrieve_file_properties:
             return self.custom_retrieve_file_properties(name, path)
-        if m.group("name"):
+        try:
             try:
-                filename = base64.b16decode(m.group("name"), True).decode("utf-8")
-                filename = re.sub(REGEX_UPLOAD_CLEANUP, "_", filename)
-            except (TypeError, AttributeError, binascii.Error):
-                filename = name
-        else:
+                filename = to_unicode(
+                    base64.b16decode(m.group("name"), True)
+                )  # Legacy file encoding is base 16 lowercase
+            except (binascii.Error, TypeError):
+                filename = to_unicode(
+                    base64.urlsafe_b64decode(m.group("name"))
+                )  # New encoding is base 64
+            filename = re.sub(REGEX_UPLOAD_CLEANUP, "_", filename)
+        except (TypeError, AttributeError):
             filename = name
         # ## if file is in DB
         if isinstance(self_uploadfield, (str, Field)):
@@ -2146,6 +2268,7 @@ class Field(Expression, Serializable):
                 path = self.uploadfolder
             else:
                 path = pjoin(self.db._adapter.folder, "..", "uploads")
+                path = os.path.abspath(path)
         if self.uploadseparate:
             t = m.group("table")
             f = m.group("field")
@@ -2195,6 +2318,7 @@ class Field(Expression, Serializable):
             "authorize",
             "represent",
             "ondelete",
+            "onupdate",
             "custom_store",
             "autodelete",
             "custom_retrieve",
@@ -2298,7 +2422,7 @@ class Query(Serializable):
         first=None,
         second=None,
         ignore_common_filters=False,
-        **optional_args
+        **optional_args,
     ):
         self.db = self._db = db
         self.op = op
@@ -2667,6 +2791,19 @@ class Set(Serializable):
         fields = adapter.expand_all(fields, tablenames)
         return adapter.nested_select(self.query, fields, attributes)
 
+    def cte(self, name, *fields, **attributes):
+        adapter = self.db._adapter
+        tablenames = adapter.tables(
+            self.query,
+            attributes.get("join", None),
+            attributes.get("left", None),
+            attributes.get("orderby", None),
+            attributes.get("groupby", None),
+        )
+        attributes["cte"] = True
+        fields = adapter.expand_all(fields, tablenames)
+        return adapter.nested_select(self.query, fields, attributes).with_alias(name)
+
     def delete(self):
         db = self.db
         table = db._adapter.get_table(self.query)
@@ -2709,28 +2846,27 @@ class Set(Serializable):
         return ret
 
     def validate_and_update(self, **update_fields):
+        response = {"updated": 0, "errors": {}}
         table = self.db._adapter.get_table(self.query)
-        response = Row()
-        response.errors = Row()
-        new_fields = copy.copy(update_fields)
-        for key, value in iteritems(update_fields):
-            value, error = table[key].validate(value, update_fields.get("id"))
-            if error:
-                response.errors[key] = "%s" % error
-            else:
-                new_fields[key] = value
-        if response.errors:
-            response.updated = None
+        # use {} instead of None to make an empty record
+        # to that we use update values instead of default values
+        errors, new_fields = table._validate_fields(update_fields, {})
+        if errors:
+            response["updated"] = 0
+            response["errors"] = errors
         else:
+            print(new_fields)
             row = table._fields_and_values_for_update(new_fields)
+            print(row)
             if not row._values:
                 raise ValueError("No fields to update")
             if any(f(self, row) for f in table._before_update):
                 ret = 0
             else:
+                print(row.op_values())
                 ret = self.db._adapter.update(table, self.query, row.op_values())
                 ret and [f(self, row) for f in table._after_update]
-            response.updated = ret
+            response["updated"] = ret
         return response
 
 
@@ -3155,7 +3291,7 @@ class Rows(BasicRows):
         if not keyed_virtualfields:
             return self
         for row in self.records:
-            for (tablename, virtualfields) in iteritems(keyed_virtualfields):
+            for tablename, virtualfields in iteritems(keyed_virtualfields):
                 attributes = dir(virtualfields)
                 if tablename not in row:
                     box = row[tablename] = Row()
@@ -3588,7 +3724,7 @@ class IterRows(BasicRows):
 
         # fetch and drop the first key - 1 elements
         for i in xrange(n_to_drop):
-            self.cursor._fetchone()
+            self.cursor.fetchone()
         row = next(self)
         if row is None:
             raise IndexError

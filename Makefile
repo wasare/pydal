@@ -1,15 +1,9 @@
-.PHONY: clean build install deploy test.sql
+.PHONY: test build deploy
 
-clean:
-	rm dist/* || echo ''
-	python3 setup.py clean
-build: clean
-	python3 setup.py build
-install: build
-	python3 setup.py install
-test.sql: install
-	python3 -m unittest tests.sql
+test:
+	python -m unittest tests
+build:
+	rm -rf dist/*
+	python -m build
 deploy: build
-	#http://guide.python-distribute.org/creation.html
-	python3 setup.py sdist
-	twine upload dist/*
+	python -m twine upload dist/*

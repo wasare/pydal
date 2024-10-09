@@ -4,28 +4,38 @@
 """
 
 from __future__ import print_function
-import os
-import glob
-import datetime
-import json
-import pickle
 
-from pydal._compat import basestring, StringIO, integer_types, xrange, BytesIO, to_bytes
+import datetime
+import glob
+import json
+import os
+import pickle
+from unittest import skipIf
+
 from pydal import DAL, Field
+from pydal._compat import (
+    PY2,
+    BytesIO,
+    StringIO,
+    basestring,
+    integer_types,
+    to_bytes,
+    xrange,
+)
 from pydal.helpers.classes import SQLALL, OpRow
-from pydal.objects import Table, Expression, Row
-from ._compat import unittest
+from pydal.objects import Expression, Row, Table
+
 from ._adapt import (
     DEFAULT_URI,
-    IS_POSTGRESQL,
-    IS_SQLITE,
     IS_MSSQL,
     IS_MYSQL,
-    IS_TERADATA,
     IS_NOSQL,
     IS_ORACLE,
+    IS_POSTGRESQL,
+    IS_SQLITE,
+    IS_TERADATA,
 )
-
+from ._compat import unittest
 from ._helpers import DALtest
 
 long = integer_types[-1]
@@ -131,20 +141,19 @@ class TestFields(DALtest):
         # Check that Field names don't allow a unicode string
         non_valid_examples = non_valid_examples = [
             "ℙƴ☂ℌøἤ",
-            u"ℙƴ☂ℌøἤ",
-            u"àè",
-            u"ṧøмℯ",
-            u"тεṧт",
-            u"♥αłüℯṧ",
-            u"ℊεᾔ℮яαт℮∂",
-            u"♭ƴ",
-            u"ᾔ☤ρℌℓ☺ḓ",
+            "ℙƴ☂ℌøἤ",
+            "àè",
+            "ṧøмℯ",
+            "тεṧт",
+            "♥αłüℯṧ",
+            "ℊεᾔ℮яαт℮∂",
+            "♭ƴ",
+            "ᾔ☤ρℌℓ☺ḓ",
         ]
         for a in non_valid_examples:
             self.assertRaises(SyntaxError, Field, a, "string")
 
     def testFieldTypes(self):
-
         # Check that string, and password default length is 512
         for typ in ["string", "password"]:
             self.assertTrue(
@@ -165,7 +174,6 @@ class TestFields(DALtest):
         )
 
     def testFieldLabels(self):
-
         # Check that a label is successfully built from the supplied fieldname
         self.assertTrue(
             Field("abc", "string").label == "Abc", "Label built is incorrect"
@@ -175,7 +183,6 @@ class TestFields(DALtest):
         )
 
     def testFieldFormatters(self):  # Formatter should be called Validator
-
         # Test the default formatters
         for typ in ALLOWED_DATATYPES:
             f = Field("abc", typ)
@@ -322,7 +329,15 @@ class TestFields(DALtest):
         db.define_table(
             "tt", Field("aa", "datetime", default=datetime.datetime.today())
         )
-        t0 = datetime.datetime(1971, 12, 21, 10, 30, 55, 0,)
+        t0 = datetime.datetime(
+            1971,
+            12,
+            21,
+            10,
+            30,
+            55,
+            0,
+        )
         self.assertEqual(db.tt.insert(aa=t0), 1)
         self.assertEqual(db().select(db.tt.aa)[0].aa, t0)
 
@@ -419,14 +434,14 @@ class TestTables(unittest.TestCase):
         # Check that Table names don't allow a unicode string
         non_valid_examples = [
             "ℙƴ☂ℌøἤ",
-            u"ℙƴ☂ℌøἤ",
-            u"àè",
-            u"ṧøмℯ",
-            u"тεṧт",
-            u"♥αłüℯṧ",
-            u"ℊεᾔ℮яαт℮∂",
-            u"♭ƴ",
-            u"ᾔ☤ρℌℓ☺ḓ",
+            "ℙƴ☂ℌøἤ",
+            "àè",
+            "ṧøмℯ",
+            "тεṧт",
+            "♥αłüℯṧ",
+            "ℊεᾔ℮яαт℮∂",
+            "♭ƴ",
+            "ᾔ☤ρℌℓ☺ḓ",
         ]
         for a in non_valid_examples:
             self.assertRaises(SyntaxError, Table, None, a)
@@ -443,7 +458,6 @@ class TestAll(unittest.TestCase):
 
 class TestTable(DALtest):
     def testTableCreation(self):
-
         # Check for error when not passing type other than Field or Table
 
         self.assertRaises(SyntaxError, Table, None, "test", None)
@@ -770,6 +784,61 @@ class TestSubselect(DALtest):
         self.assertEqual(sub.sql_shortref, db._adapter.dialect.quote("foo"))
         self.assertIsInstance(sub.on(sub.aa != None), Expression)
 
+    @skipIf(PY2, "sqlite3 on py2 does not allow circular references")
+    def testCTE(self):
+        db = self.connect()
+        db.define_table("org", Field("name"), Field("boss", "reference org"))
+        org = db.org
+
+        def insert_workers(boss, *names):
+            return [org.insert(name=name, boss=boss) for name in names]
+
+        alice = org.insert(name="Alice")
+        jim, tim = insert_workers(alice, "Jim", "Tim")
+        jessy, jenny = insert_workers(jim, "Jessy", "Jenny")
+        insert_workers(tim, "Tom")
+        insert_workers(jessy, "John", "Jacob")
+
+        works_for = (
+            db(org.name == "Alice")
+            .cte(
+                "works_for",
+                org.id,
+                org.name.with_alias("top_boss"),  # i.e. Alice is top_boss
+                org.name,
+                org.boss,
+                Expression(db, "0", type="integer").with_alias("xdepth"),
+                Expression(db, '" "', type="string").with_alias("boss_chain"),
+            )
+            .union(
+                lambda works_for: db(
+                    (org.boss == works_for.id) & (org.id != org.boss)
+                ).nested_select(
+                    org.id,
+                    works_for.top_boss,
+                    org.name,
+                    org.boss,
+                    (works_for.xdepth + 1).with_alias("xdepth"),
+                    (" " + works_for.name + works_for.boss_chain).with_alias(
+                        "boss_chain"
+                    ),
+                )
+            )
+        )
+        rows = db().select(works_for.ALL).as_dict()
+        #  reconstruct boss_chain/depth and test them against query result
+        for row in rows.values():
+            r = row
+            boss_chain = []
+            while True:
+                r = rows.get(r["boss"])
+                if not r:
+                    break
+                boss_chain.append(r["name"])
+            depth = len(boss_chain)
+            self.assertEqual(depth, row["xdepth"])
+            self.assertEqual(" ".join(boss_chain), row["boss_chain"].strip())
+
     def testSelectArguments(self):
         db = self.connect()
         db.define_table("tt", Field("aa", "integer"), Field("bb"))
@@ -805,7 +874,7 @@ class TestSubselect(DALtest):
             orderby=order,
             groupby=group,
             having=having,
-            limitby=limit
+            limitby=limit,
         )
         result = sub()
         self.assertEqual(len(result), len(expected))
@@ -1416,7 +1485,6 @@ class TestExpressions(DALtest):
         op1 = (sum / count).with_alias("tot")
         self.assertEqual(db(t0).select(op).first()[op], 2)
         self.assertEqual(db(t0).select(op1).first()[op1], 2)
-        print("DICT", db(t0).select(op1).as_dict())
         self.assertEqual(db(t0).select(op1).first()["tot"], 2)
         op2 = avg * count
         self.assertEqual(db(t0).select(op2).first()[op2], 6)
@@ -1746,7 +1814,6 @@ class TestMigrations(unittest.TestCase):
         db.close()
 
         if not IS_SQLITE:
-
             # Change field type
             db = DAL(DEFAULT_URI, check_reserved=["all"])
             db.define_table(
@@ -1775,7 +1842,6 @@ class TestMigrations(unittest.TestCase):
             db.close()
 
         if not IS_SQLITE:
-
             # Change field rname
             db = DAL(DEFAULT_URI, check_reserved=["all"])
             db.define_table(
@@ -1833,7 +1899,7 @@ class TestReference(DALtest):
             (False, "CASCADE"),
             (False, "SET NULL"),
         )
-        for (b, ondelete) in scenarios:
+        for b, ondelete in scenarios:
             db = self.connect(bigint_id=b)
             if DEFAULT_URI.startswith("mssql"):
                 # multiple cascade gotcha
@@ -2214,7 +2280,9 @@ class TestSelectAsDict(DALtest):
         if IS_ORACLE:
             # if lowercase fieldnames desired in return, must be quoted in oracle
             db.define_table(
-                "a_table", Field("b_field"), Field("a_field"),
+                "a_table",
+                Field("b_field"),
+                Field("a_field"),
             )
             db.a_table.insert(a_field="aa1", b_field="bb1")
             rtn = db.executesql(
@@ -2229,7 +2297,9 @@ class TestSelectAsDict(DALtest):
 
         else:
             db.define_table(
-                "a_table", Field("b_field"), Field("a_field"),
+                "a_table",
+                Field("b_field"),
+                Field("a_field"),
             )
             db.a_table.insert(a_field="aa1", b_field="bb1")
             rtn = db.executesql(
@@ -2249,7 +2319,9 @@ class TestExecuteSQL(DALtest):
             # see note on prior test
             db = self.connect(DEFAULT_URI, entity_quoting=True)
             db.define_table(
-                "a_table", Field("b_field"), Field("a_field"),
+                "a_table",
+                Field("b_field"),
+                Field("a_field"),
             )
             db.a_table.insert(a_field="aa1", b_field="bb1")
             rtn = db.executesql(
@@ -2291,7 +2363,9 @@ class TestExecuteSQL(DALtest):
         if not IS_ORACLE:
             db = self.connect(DEFAULT_URI, entity_quoting=False)
             db.define_table(
-                "a_table", Field("b_field"), Field("a_field"),
+                "a_table",
+                Field("b_field"),
+                Field("a_field"),
             )
             db.a_table.insert(a_field="aa1", b_field="bb1")
             rtn = db.executesql(
@@ -2813,7 +2887,15 @@ class TestRNameFields(DALtest):
             "tt",
             Field("aa", "datetime", default=datetime.datetime.today(), rname=rname),
         )
-        t0 = datetime.datetime(1971, 12, 21, 10, 30, 55, 0,)
+        t0 = datetime.datetime(
+            1971,
+            12,
+            21,
+            10,
+            30,
+            55,
+            0,
+        )
         self.assertEqual(db.tt.insert(aa=t0), 1)
         self.assertEqual(db().select(db.tt.aa)[0].aa, t0)
 
@@ -3031,7 +3113,6 @@ class TestRNameFields(DALtest):
 
 
 class TestQuoting(DALtest):
-
     # tests for case sensitivity
     def testCase(self):
         db = self.connect(ignore_field_case=False, entity_quoting=True)
@@ -3075,7 +3156,6 @@ class TestQuoting(DALtest):
         self.assertEqual(t0[1].a_A, "a_A")
 
     def testPKFK(self):
-
         # test primary keys
 
         db = self.connect(ignore_field_case=False)
@@ -3121,7 +3201,6 @@ class TestQuoting(DALtest):
             t4.drop()
 
     def testPKFK2(self):
-
         # test reference to reference
 
         db = self.connect(ignore_field_case=False)
@@ -3182,11 +3261,11 @@ class TestQuotesByDefault(unittest.TestCase):
     def testme(self):
         return
 
-class TestGis(DALtest):
 
+class TestGis(DALtest):
     @unittest.skipIf(True, "WIP")
     def testGeometry(self):
-        from pydal import geoPoint, geoLine, geoPolygon
+        from pydal import geoLine, geoPoint, geoPolygon
 
         if not IS_POSTGRESQL:
             return
@@ -3227,7 +3306,7 @@ class TestGis(DALtest):
 
     @unittest.skipIf(True, "WIP")
     def testGeometryCase(self):
-        from pydal import geoPoint, geoLine, geoPolygon
+        from pydal import geoLine, geoPoint, geoPolygon
 
         if not IS_POSTGRESQL:
             return
@@ -3267,18 +3346,18 @@ class TestJSON(DALtest):
         tj = db.define_table("tj", Field("testjson", "json"))
         rec1 = tj.insert(
             testjson={
-                u"a": {u"a1": 2, u"a0": 1},
-                u"b": 3,
-                u"c": {u"c0": {u"c01": [2, 4]}},
-                u"str": "foo",
+                "a": {"a1": 2, "a0": 1},
+                "b": 3,
+                "c": {"c0": {"c01": [2, 4]}},
+                "str": "foo",
             }
         )
         rec2 = tj.insert(
             testjson={
-                u"a": {u"a1": 2, u"a0": 2},
-                u"b": 4,
-                u"c": {u"c0": {u"c01": [2, 3]}},
-                u"str": "bar",
+                "a": {"a1": 2, "a0": 2},
+                "b": 4,
+                "c": {"c0": {"c01": [2, 3]}},
+                "str": "bar",
             }
         )
         rows = db(db.tj.testjson.json_key("a").json_key_value("a0") == 1).select()
@@ -3356,7 +3435,9 @@ class TestLazy(DALtest):
         db = self.connect(check_reserved=None, lazy_tables=True)
         db.define_table("tt", Field("value", "integer"))
         db.define_table(
-            "ttt", Field("value", "integer"), Field("tt_id", "reference tt"),
+            "ttt",
+            Field("value", "integer"),
+            Field("tt_id", "reference tt"),
         )
         # Force table definition
         db.ttt.value.writable = False

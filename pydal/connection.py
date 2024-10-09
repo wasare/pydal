@@ -3,6 +3,7 @@
 
 import os
 import threading
+
 from ._compat import itervalues
 from ._globals import GLOBAL_LOCKER, THREAD_LOCAL
 from ._load import OrderedDict
@@ -60,7 +61,7 @@ class ConnectionPool(object):
                 GLOBAL_LOCKER.release()
 
         # if still no connection, make a new one and run the hooks
-        # note we serialize actual connectons to protect hooks
+        # note we serialize actual connections to protect hooks
         if connection is None:
             connection = self.connector()
             self.set_connection(connection, run_hooks=True)
@@ -111,13 +112,15 @@ class ConnectionPool(object):
             except:
                 #: connection had some problems, we want to drop it
                 succeeded = False
+        # close the cursor
+        self.cursor.close()
         # if we have pools, we should recycle the connection (but only when
         # we succeded in `action`, if any and `len(pool)` is good)
         if self.pool_size and succeeded:
             try:
                 GLOBAL_LOCKER.acquire()
                 pool = ConnectionPool.POOLS[self.uri]
-                if len(pool) < self.pool_size:
+                if len(pool) < int(self.pool_size):
                     pool.append(self.connection)
                     really = False
             finally:
@@ -136,7 +139,7 @@ class ConnectionPool(object):
 
     @staticmethod
     def close_all_instances(action):
-        """ to close cleanly databases in a multithreaded environment """
+        """to close cleanly databases in a multithreaded environment"""
         dbs = getattr(THREAD_LOCAL, "_pydal_db_instances_", {}).items()
         for db_uid, db_group in dbs:
             for db in db_group:

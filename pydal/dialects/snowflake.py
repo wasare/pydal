@@ -1,23 +1,24 @@
 from .._compat import basestring, integer_types
-from ..adapters.postgres import Postgre, PostgreBoolean, PostgreNew
+from ..adapters.snowflake import Snowflake
 from ..helpers.methods import varquote_aux
 from ..objects import Expression
 from . import dialects, register_expression, sqltype_for
 from .base import SQLDialect
 
 
-@dialects.register_for(Postgre)
-class PostgreDialect(SQLDialect):
+@dialects.register_for(Snowflake)
+class SnowflakeDialect(SQLDialect):
     true_exp = "TRUE"
     false_exp = "FALSE"
+    quote_template = " %s "
 
     @sqltype_for("blob")
     def type_blob(self):
-        return "BYTEA"
+        return "BINARY"
 
     @sqltype_for("bigint")
     def type_bigint(self):
-        return "BIGINT"
+        return "NUMBER"
 
     @sqltype_for("double")
     def type_double(self):
@@ -25,17 +26,17 @@ class PostgreDialect(SQLDialect):
 
     @sqltype_for("id")
     def type_id(self):
-        return "SERIAL PRIMARY KEY"
+        return "NUMBER PRIMARY KEY AUTOINCREMENT"
 
     @sqltype_for("big-id")
     def type_big_id(self):
-        return "BIGSERIAL PRIMARY KEY"
+        return "NUMBER PRIMARY KEY AUTOINCREMENT"
 
     @sqltype_for("big-reference")
     def type_big_reference(self):
         return (
-            "BIGINT REFERENCES %(foreign_key)s "
-            + "ON DELETE %(on_delete_action)s ON UPDATE %(on_update_action)s %(null)s %(unique)s"
+            "NUMBER REFERENCES %(foreign_key)s "
+            + "ON DELETE %(on_delete_action)s %(null)s %(unique)s"
         )
 
     @sqltype_for("reference TFK")
@@ -43,7 +44,7 @@ class PostgreDialect(SQLDialect):
         return (
             ' CONSTRAINT "FK_%(constraint_name)s_PK" FOREIGN KEY '
             + "(%(field_name)s) REFERENCES %(foreign_table)s"
-            + "(%(foreign_key)s) ON DELETE %(on_delete_action)s ON UPDATE %(on_update_action)s"
+            + "(%(foreign_key)s) ON DELETE %(on_delete_action)s"
         )
 
     @sqltype_for("geometry")
@@ -58,13 +59,73 @@ class PostgreDialect(SQLDialect):
         return varquote_aux(val, '"%s"')
 
     def sequence_name(self, tablename):
-        return self.quote("%s_id_seq" % tablename)
+        return "%s_id_seq" % tablename
 
-    def insert(self, table, fields, values, returning=None):
-        ret = ""
-        if returning:
-            ret = "RETURNING %s" % returning
-        return "INSERT INTO %s(%s) VALUES (%s)%s;" % (table, fields, values, ret)
+    def insert(self, table, fields, values):
+        return "INSERT INTO %s(%s) VALUES (%s);" % (table, fields, values)
+
+    def select(
+        self,
+        fields,
+        tables,
+        where=None,
+        groupby=None,
+        having=None,
+        orderby=None,
+        limitby=None,
+        distinct=False,
+        for_update=False,
+        with_cte=False,
+    ):
+        dst, whr, grp, order, limit, offset, upd = "", "", "", "", "", "", ""
+        if distinct is True:
+            dst = " DISTINCT"
+        elif distinct:
+            dst = " DISTINCT ON (%s)" % distinct
+        if where:
+            whr = " %s" % self.where(where)
+
+        if groupby:
+            grp = " GROUP BY %s" % groupby
+            if having:
+                grp += " HAVING %s" % having
+        if orderby:
+            order = " ORDER BY %s" % orderby
+        if limitby:
+            (lmin, lmax) = limitby
+            if whr:
+                whr2 = whr + " AND w_row > %i" % lmin
+            else:
+                whr2 = self.where("w_row > %i" % lmin)
+
+        return "SELECT%s%s%s %s FROM %s%s%s%s;" % (
+            dst,
+            limit,
+            offset,
+            fields,
+            tables,
+            whr,
+            grp,
+            order,
+        )
+
+    def delete(self, table, where=None):
+        tablename = self.writing_alias(table)
+        whr = ""
+        if where:
+            whr = " %s" % self.where(where)
+        return "DELETE FROM %s %s;" % (tablename, whr)
+
+    def update(self, table, values, where=None):
+        tablename = self.writing_alias(table)
+        whr = ""
+        if where:
+            whr = " %s" % self.where(where)
+        return "UPDATE %s SET %s%s;" % (
+            tablename,
+            values,
+            whr,
+        )
 
     @property
     def random(self):
@@ -83,7 +144,7 @@ class PostgreDialect(SQLDialect):
                 self.expand(second, first.type, query_env=query_env),
             )
 
-    def regexp(self, first, second, match_parameter=None, query_env={}, **kwargs):
+    def regexp(self, first, second, match_parameter=None, query_env={}):
         return "(%s ~ %s)" % (
             self.expand(first, query_env=query_env),
             self.expand(second, "string", query_env=query_env),
@@ -95,8 +156,13 @@ class PostgreDialect(SQLDialect):
         else:
             second = self.expand(second, "string", query_env=query_env)
             if escape is None:
-                escape = "\\"
-                second = second.replace(escape, escape * 2)
+                escape = r"\\ "
+                # second = second.replace(escape, escape * 2)
+            check = r"\ "
+            check = check.strip()
+            if escape == check:
+                escape = r"\\ "
+                escape = escape.strip()
         if first.type not in ("string", "text", "json", "jsonb"):
             return "(%s LIKE %s ESCAPE '%s')" % (
                 self.cast(
@@ -117,8 +183,14 @@ class PostgreDialect(SQLDialect):
         else:
             second = self.expand(second, "string", query_env=query_env)
             if escape is None:
-                escape = "\\"
-                second = second.replace(escape, escape * 2)
+                escape = r"\\ "
+                escape = escape.strip()
+                # second = second.replace(escape, escape * 2)
+            check = r"\ "
+            check = check.strip()
+            if escape == check:
+                escape = r"\\ "
+                escape = escape.strip()
         if first.type not in ("string", "text", "json", "jsonb", "list:string"):
             return "(%s ILIKE %s ESCAPE '%s')" % (
                 self.cast(
@@ -146,7 +218,7 @@ class PostgreDialect(SQLDialect):
         with self.adapter.index_expander():
             rv = "CREATE%s INDEX %s ON %s (%s)%s;" % (
                 uniq,
-                self.quote(name),
+                name,
                 table._rname,
                 ",".join(self.expand(field) for field in expressions),
                 whr,
@@ -159,6 +231,11 @@ class PostgreDialect(SQLDialect):
             second["precision"],
             second["options"],
         )
+
+    def unquote(self, val):
+        if val[0] == '"' and val[-1] == '"':
+            val = val.replace('"', "")
+        return val
 
     def st_astext(self, first, query_env={}):
         return "ST_AsText(%s)" % self.expand(first, query_env=query_env)
@@ -281,126 +358,3 @@ class PostgreDialect(SQLDialect):
     @register_expression("millenium")
     def extract_millenium(self, expr):
         return Expression(expr.db, self.extract, expr, "millenium", "integer")
-
-
-class PostgreDialectJSON(PostgreDialect):
-    @sqltype_for("json")
-    def type_json(self):
-        return "JSON"
-
-    @sqltype_for("jsonb")
-    def type_jsonb(self):
-        return "JSONB"
-
-    def st_astext(self, first, query_env={}):
-        return "ST_AsText(%s)" % self.expand(first, query_env=query_env)
-
-    def st_asgeojson(self, first, second, query_env={}):
-        return "ST_AsGeoJSON(%s,%s,%s)" % (
-            self.expand(first, query_env=query_env),
-            second["precision"],
-            second["options"],
-        )
-
-    def json_key(self, first, key, query_env=None):
-        """Get the json in key which you can use for more queries"""
-        if isinstance(key, basestring):
-            key = self.expand(key, "string", query_env=query_env)
-        elif not isinstance(key, integer_types):
-            raise TypeError("Key must be a string or int")
-        return "%s->%s" % (self.expand(first, query_env=query_env or {}), key)
-
-    def json_key_value(self, first, key, query_env=None):
-        """Get the value int or text in key"""
-        if isinstance(key, basestring):
-            key = self.expand(key, "string", query_env=query_env)
-        elif isinstance(key, integer_types):
-            key = self.expand(key, "integer", query_env=query_env)
-        else:
-            raise TypeError("Key must be a string or int")
-        return "%s->>%s" % (self.expand(first, query_env=query_env or {}), key)
-
-    def json_path(self, first, path, query_env=None):
-        """Get the json in path which you can use for more queries"""
-        return "%s#>'%s'" % (self.expand(first, query_env=query_env or {}), path)
-
-    def json_path_value(self, first, path, query_env=None):
-        """Get the json in path which you can use for more queries"""
-        return "%s#>>'%s'" % (self.expand(first, query_env=query_env or {}), path)
-
-    # JSON Queries
-    def json_contains(self, first, jsonvalue, query_env=None):
-        # requires jsonb, value is json e.g. '{"country": "Peru"}'
-        return "%s::jsonb@>'%s'::jsonb" % (
-            self.expand(first, query_env=query_env or {}),
-            jsonvalue,
-        )
-
-
-@dialects.register_for(PostgreNew)
-class PostgreDialectArrays(PostgreDialect):
-    @sqltype_for("list:integer")
-    def type_list_integer(self):
-        return "BIGINT[]"
-
-    @sqltype_for("list:string")
-    def type_list_string(self):
-        return "TEXT[]"
-
-    @sqltype_for("list:reference")
-    def type_list_reference(self):
-        return "BIGINT[]"
-
-    def any(self, val, query_env={}):
-        return "ANY(%s)" % self.expand(val, query_env=query_env)
-
-    def contains(self, first, second, case_sensitive=True, query_env={}):
-        if first.type.startswith("list:"):
-            f = self.expand(second, "string", query_env=query_env)
-            s = self.any(first, query_env)
-            if case_sensitive is True:
-                return self.eq(f, s)
-            return self.ilike(f, s, escape="\\", query_env=query_env)
-        return super(PostgreDialectArrays, self).contains(
-            first, second, case_sensitive=case_sensitive, query_env=query_env
-        )
-
-    def ilike(self, first, second, escape=None, query_env={}):
-        if first and "type" not in first:
-            args = (first, self.expand(second, query_env=query_env))
-            return "(%s ILIKE %s)" % args
-        return super(PostgreDialectArrays, self).ilike(
-            first, second, escape=escape, query_env=query_env
-        )
-
-    def eq(self, first, second=None, query_env={}):
-        if first and "type" not in first:
-            return "(%s = %s)" % (first, self.expand(second, query_env=query_env))
-        return super(PostgreDialectArrays, self).eq(first, second, query_env)
-
-
-class PostgreDialectArraysJSON(PostgreDialectArrays):
-    @sqltype_for("json")
-    def type_json(self):
-        return "JSON"
-
-    @sqltype_for("jsonb")
-    def type_jsonb(self):
-        return "JSONB"
-
-
-@dialects.register_for(PostgreBoolean)
-class PostgreDialectBoolean(PostgreDialectArrays):
-    @sqltype_for("boolean")
-    def type_boolean(self):
-        return "BOOLEAN"
-
-
-class PostgreDialectBooleanJSON(PostgreDialectBoolean):
-    @sqltype_for("json")
-    def type_json(self):
-        return "JSON"
-
-    @sqltype_for("jsonb")
-    def type_jsonb(self):
-        return "JSONB"

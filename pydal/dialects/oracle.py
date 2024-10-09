@@ -1,8 +1,9 @@
-from ..adapters.oracle import Oracle
-from .._compat import integer_types, basestring
-from .base import SQLDialect
-from . import dialects, sqltype_for
 import re
+
+from .._compat import basestring, integer_types
+from ..adapters.oracle import Oracle
+from . import dialects, sqltype_for
+from .base import SQLDialect
 
 
 @dialects.register_for(Oracle)
@@ -149,9 +150,9 @@ class OracleDialect(SQLDialect):
         return constraint_name
 
     def primary_key(self, key):
-        if len(re.split(",\s*", key)) > 1:
+        if len(re.split(r",\s*", key)) > 1:
             return "PRIMARY KEY(%s)" % ", ".join(
-                [self.quote(k) for k in re.split(",\s*", key)]
+                [self.quote(k) for k in re.split(r",\s*", key)]
             )
         return "PRIMARY KEY(%s)" % key
 
@@ -169,10 +170,18 @@ class OracleDialect(SQLDialect):
             )
         return super(OracleDialect, self).eq(first, second, query_env)
 
-    def regexp(self, first, second, query_env={}):
-        return "REGEXP_LIKE(%s, %s)" % (
+    def regexp(self, first, second, match_parameter, query_env={}):
+        if match_parameter:
+            _match_parameter = "," + self.expand(
+                match_parameter, "string", query_env=query_env
+            )
+        else:
+            _match_parameter = ""
+
+        return "REGEXP_LIKE(%s, %s %s)" % (
             self.expand(first, query_env=query_env),
             self.expand(second, "string", query_env=query_env),
+            _match_parameter,
         )
 
     def insert(self, table, fields, values):
@@ -195,6 +204,7 @@ class OracleDialect(SQLDialect):
         limitby=None,
         distinct=False,
         for_update=False,
+        with_cte=None,
     ):
         dst, whr, grp, order, limit, offset, upd = "", "", "", "", "", "", ""
         if distinct is True:
@@ -209,6 +219,14 @@ class OracleDialect(SQLDialect):
                 grp += " HAVING %s" % having
         if orderby:
             order = " ORDER BY %s" % orderby
+
+        if with_cte:
+            recursive, cte = with_cte
+            recursive = " RECURSIVE" if recursive else ""
+            with_cte = "WITH%s %s " % (recursive, cte)
+        else:
+            with_cte = ""
+
         if limitby:
             (lmin, lmax) = limitby
             if whr:
@@ -216,12 +234,13 @@ class OracleDialect(SQLDialect):
             else:
                 whr2 = self.where("w_row > %i" % lmin)
             return """
-                SELECT%s * FROM (
+                %sSELECT%s * FROM (
                     SELECT w_tmp.*, ROWNUM w_row FROM (
                         SELECT %s FROM %s%s%s%s
-                    ) w_tmp 
+                    ) w_tmp
                 ) WHERE w_row<=%i and w_row>%i
             """ % (
+                with_cte,
                 dst,
                 fields,
                 tables,
@@ -233,7 +252,8 @@ class OracleDialect(SQLDialect):
             )
         if for_update:
             upd = " FOR UPDATE"
-        return "SELECT%s %s FROM %s%s%s%s%s%s%s;" % (
+        return "%sSELECT%s %s FROM %s%s%s%s%s%s%s;" % (
+            with_cte,
             dst,
             fields,
             tables,

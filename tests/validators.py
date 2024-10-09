@@ -1,17 +1,17 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""Unit tests for http.py """
+"""Unit tests for validators.py """
 
-import unittest
 import datetime
 import decimal
 import re
+import unittest
 
 from pydal import DAL, Field
-from pydal.validators import *
 from pydal._compat import PY2, to_bytes
-from pydal.validators import options_sorter, Validator, UTC
+from pydal.validators import *
+from pydal.validators import UTC, Validator, options_sorter
 
 
 class TestValidators(unittest.TestCase):
@@ -21,7 +21,7 @@ class TestValidators(unittest.TestCase):
         return getattr(self, "assertRegex")(*args, **kwargs)
 
     def test_MISC(self):
-        """ Test miscelaneous utility functions and some general behavior guarantees """
+        """Test miscelaneous utility functions and some general behavior guarantees"""
 
         self.assertEqual(options_sorter(("a", "a"), ("a", "a")), -1)
         self.assertEqual(options_sorter(("A", "A"), ("a", "a")), -1)
@@ -56,18 +56,18 @@ class TestValidators(unittest.TestCase):
         self.assertEqual(rtn, ("hellas", "Invalid expression"))
         rtn = IS_MATCH("^.hell$", strict=True)("shell")
         self.assertEqual(rtn, ("shell", None))
-        rtn = IS_MATCH(u"hell", is_unicode=True)("àòè")
+        rtn = IS_MATCH("hell", is_unicode=True)("àòè")
         if PY2:
             self.assertEqual(rtn, ("\xc3\xa0\xc3\xb2\xc3\xa8", "Invalid expression"))
         else:
             self.assertEqual(rtn, ("àòè", "Invalid expression"))
-        rtn = IS_MATCH(u"hell", is_unicode=True)(u"hell")
-        self.assertEqual(rtn, (u"hell", None))
-        rtn = IS_MATCH("hell", is_unicode=True)(u"hell")
-        self.assertEqual(rtn, (u"hell", None))
+        rtn = IS_MATCH("hell", is_unicode=True)("hell")
+        self.assertEqual(rtn, ("hell", None))
+        rtn = IS_MATCH("hell", is_unicode=True)("hell")
+        self.assertEqual(rtn, ("hell", None))
         # regr test for #1044
-        rtn = IS_MATCH("hello")(u"\xff")
-        self.assertEqual(rtn, (u"\xff", "Invalid expression"))
+        rtn = IS_MATCH("hello")("\xff")
+        self.assertEqual(rtn, ("\xff", "Invalid expression"))
 
     def test_IS_EQUAL_TO(self):
         rtn = IS_EQUAL_TO("aaa")("aaa")
@@ -107,7 +107,7 @@ class TestValidators(unittest.TestCase):
         rtn = IS_LENGTH(minsize=1)([1])
         self.assertEqual(rtn, ([1], None))
         # test non utf-8 str
-        cpstr = u"lálá".encode("cp1252")
+        cpstr = "lálá".encode("cp1252")
         rtn = IS_LENGTH(minsize=4)(cpstr)
         self.assertEqual(rtn, (cpstr, None))
         rtn = IS_LENGTH(maxsize=4)(cpstr)
@@ -115,16 +115,16 @@ class TestValidators(unittest.TestCase):
         rtn = IS_LENGTH(minsize=0, maxsize=3)(cpstr)
         self.assertEqual(rtn, (cpstr, "Enter from 0 to 3 characters"))
         # test unicode
-        rtn = IS_LENGTH(2)(u"°2")
+        rtn = IS_LENGTH(2)("°2")
         if PY2:
             self.assertEqual(rtn, ("\xc2\xb02", None))
         else:
-            self.assertEqual(rtn, (u"°2", None))
-        rtn = IS_LENGTH(2)(u"°12")
+            self.assertEqual(rtn, ("°2", None))
+        rtn = IS_LENGTH(2)("°12")
         if PY2:
-            self.assertEqual(rtn, (u"\xb012", "Enter from 0 to 2 characters"))
+            self.assertEqual(rtn, ("\xb012", "Enter from 0 to 2 characters"))
         else:
-            self.assertEqual(rtn, (u"°12", "Enter from 0 to 2 characters"))
+            self.assertEqual(rtn, ("°12", "Enter from 0 to 2 characters"))
         # test automatic str()
         rtn = IS_LENGTH(minsize=1)(1)
         self.assertEqual(rtn, ("1", None))
@@ -158,7 +158,7 @@ class TestValidators(unittest.TestCase):
 
     def test_IS_JSON(self):
         rtn = IS_JSON()('{"a": 100}')
-        self.assertEqual(rtn, ({u"a": 100}, None))
+        self.assertEqual(rtn, ({"a": 100}, None))
         rtn = IS_JSON()("spam1234")
         self.assertEqual(rtn, ("spam1234", "Invalid json"))
         rtn = IS_JSON(native_json=True)('{"a": 100}')
@@ -209,6 +209,15 @@ class TestValidators(unittest.TestCase):
         self.assertEqual(rtn, [("id1", "id1"), ("id2", "id2")])
         rtn = IS_IN_SET(["id2", "id1"], sort=True).options(zero=False)
         self.assertEqual(rtn, [("id1", "id1"), ("id2", "id2")])
+
+        # sets can be lazy
+        theset = []
+        validator = IS_IN_SET(lambda: theset)
+        rtn = validator("max")
+        self.assertEqual(rtn, ("max", "Value not allowed"))
+        theset.append("max")
+        rtn = validator("max")
+        self.assertEqual(rtn, ("max", None))
 
     def test_IS_IN_DB(self):
         db = DAL("sqlite:memory")
@@ -301,11 +310,13 @@ class TestValidators(unittest.TestCase):
             Field("name"),
         )
         ret = db.category.validate_and_insert(name="seinfeld")
-        self.assertFalse(list(ret.errors))
-        ret = db.category.validate_and_insert(name="characters", parent_id=ret.id)
-        self.assertFalse(list(ret.errors))
-        rtn = IS_IN_DB(db, "category.id", "%(name)s")(ret.id)
-        self.assertEqual(rtn, (ret.id, None))
+        self.assertFalse(ret.get("errors"))
+        ret = db.category.validate_and_insert(
+            name="characters", parent_id=ret.get("id")
+        )
+        self.assertFalse(ret.get("errors"))
+        rtn = IS_IN_DB(db, "category.id", "%(name)s")(ret.get("id"))
+        self.assertEqual(rtn, (ret.get("id"), None))
         # Test _and
         vldtr = IS_IN_DB(
             db,
@@ -333,11 +344,11 @@ class TestValidators(unittest.TestCase):
             "ref_table", Field("name"), Field("person_id", "reference person")
         )
         ret = db.ref_table.validate_and_insert(name="test reference table")
-        self.assertFalse(list(ret.errors))
+        self.assertTrue(not ret.get("errors"))
         ret = db.ref_table.validate_and_insert(
             name="test reference table", person_id=george_id
         )
-        self.assertFalse(list(ret.errors))
+        self.assertTrue(not ret.get("errors"))
         rtn = IS_IN_DB(db, "ref_table.person_id", "%(name)s")(george_id)
         self.assertEqual(rtn, (george_id, None))
         # Test it works with reference table.field and keyed table
@@ -352,11 +363,11 @@ class TestValidators(unittest.TestCase):
             Field("person_name", "reference person_keyed.name"),
         )
         ret = db.ref_table_field.validate_and_insert(name="test reference table.field")
-        self.assertFalse(list(ret.errors))
+        self.assertTrue(not ret.get("errors"))
         ret = db.ref_table_field.validate_and_insert(
             name="test reference table.field", person_name="george"
         )
-        self.assertFalse(list(ret.errors))
+        self.assertTrue(not ret.get("errors"))
         vldtr = IS_IN_DB(db, "ref_table_field.person_name", "%(name)s")
         vldtr.options()
         rtn = vldtr("george")
@@ -368,34 +379,44 @@ class TestValidators(unittest.TestCase):
             Field("person_list", "list:reference person"),
         )
         ret = db.list_ref_table.validate_and_insert(name="test list:reference table")
-        self.assertFalse(list(ret.errors))
+        self.assertTrue(not ret.get("errors"))
         ret = db.list_ref_table.validate_and_insert(
             name="test list:reference table", person_list=[george_id, costanza_id]
         )
-        self.assertFalse(list(ret.errors))
+        self.assertTrue(not ret.get("errors"))
         vldtr = IS_IN_DB(db, "list_ref_table.person_list")
         vldtr.options()
         rtn = vldtr([george_id, costanza_id])
         self.assertEqual(rtn, ([george_id, costanza_id], None))
-        # Test it works with list:reference table.field and keyed table
-        # db.define_table('list_ref_table_field',
-        #                Field('name'),
-        #                Field('person_list', 'list:reference person_keyed.name'))
-        # ret = db.list_ref_table_field.validate_and_insert(name='test list:reference table.field')
-        # self.assertFalse(list(ret.errors))
-        # ret = db.list_ref_table_field.validate_and_insert(name='test list:reference table.field', person_list=['george','costanza'])
-        # self.assertFalse(list(ret.errors))
-        # vldtr = IS_IN_DB(db, 'list_ref_table_field.person_list')
-        # vldtr.options()
-        # rtn = vldtr(['george','costanza'])
-        # self.assertEqual(rtn, (['george','costanza'], None))
         db.person.drop()
         db.category.drop()
         db.person_keyed.drop()
         db.ref_table.drop()
         db.ref_table_field.drop()
         db.list_ref_table.drop()
-        # db.list_ref_table_field.drop()
+
+    def test_IS_IN_DB_options(self):
+        db = DAL("sqlite:memory")
+        db.define_table("thing", Field("name"))
+        db.thing.insert(name="red")
+        db.thing.insert(name="green")
+        assert IS_IN_DB(db, "thing").options() == [("", ""), ("1", "1"), ("2", "2")]
+        # setting a format for the validator
+        db.thing._format = lambda i: i.name
+        assert IS_IN_DB(db, "thing").options() == [
+            ("", ""),
+            ("1", "red"),
+            ("2", "green"),
+        ]
+        assert IS_IN_DB(db, "thing", zero=None).options() == [
+            ("1", "red"),
+            ("2", "green"),
+        ]
+        assert IS_IN_DB(db, "thing", zero="x").options() == [
+            ("", "x"),
+            ("1", "red"),
+            ("2", "green"),
+        ]
 
     def test_IS_NOT_IN_DB(self):
         db = DAL("sqlite:memory")
@@ -412,9 +433,9 @@ class TestValidators(unittest.TestCase):
         self.assertEqual(rtn, ("  ", "oops"))
         rtn = IS_NOT_IN_DB(db, "person.name")("jerry")
         self.assertEqual(rtn, ("jerry", None))
-        rtn = IS_NOT_IN_DB(db, "person.name")(u"jerry")
+        rtn = IS_NOT_IN_DB(db, "person.name")("jerry")
         self.assertEqual(rtn, ("jerry", None))
-        rtn = IS_NOT_IN_DB(db(db.person.id > 0), "person.name")(u"jerry")
+        rtn = IS_NOT_IN_DB(db(db.person.id > 0), "person.name")("jerry")
         self.assertEqual(rtn, ("jerry", None))
         rtn = IS_NOT_IN_DB(db, db.person, error_message="oops")(1)
         self.assertEqual(rtn, (1, "oops"))
@@ -651,7 +672,7 @@ class TestValidators(unittest.TestCase):
         rtn = IS_EMAIL(banned=r"^.*\.com(|\..*)$")("abc@example.com")
         self.assertEqual(rtn, ("abc@example.com", "Enter a valid email address"))
         # test for forced
-        rtn = IS_EMAIL(forced="^.*\.edu(|\..*)$")("localguy@localhost")
+        rtn = IS_EMAIL(forced=r"^.*\.edu(|\..*)$")("localguy@localhost")
         self.assertEqual(rtn, ("localguy@localhost", "Enter a valid email address"))
         rtn = IS_EMAIL(forced=r"^.*\.edu(|\..*)$")("localguy@example.edu")
         self.assertEqual(rtn, ("localguy@example.edu", None))
@@ -755,7 +776,6 @@ class TestValidators(unittest.TestCase):
         # https://github.com/web2py/web2py/issues/1094
 
         class DummyTimezone(datetime.tzinfo):
-
             ONE = datetime.timedelta(hours=1)
 
             def utcoffset(self, dt):
@@ -958,14 +978,14 @@ class TestValidators(unittest.TestCase):
         self.assertEqual(rtn, "12/14/1834")
 
     class CustomValidator(Validator):
-        """ Custom Validator not overloading .validate() """
+        """Custom Validator not overloading .validate()"""
 
         def __call__(self, value):
             return (value, None) if value else (value, "invalid!")
 
     @staticmethod
     def custom_validator_func(value):
-        """ Validation function instead of Validator subclass """
+        """Validation function instead of Validator subclass"""
         return (value, None) if value else (value, "invalid!")
 
     def test_IS_EMPTY_OR(self):
@@ -1128,8 +1148,8 @@ class TestValidators(unittest.TestCase):
     def test_IS_IMAGE(self):
         class DummyImageFile(object):
             def __init__(self, filename, ext, width, height):
-                from io import BytesIO
                 import struct
+                from io import BytesIO
 
                 self.filename = filename + "." + ext
                 self.file = BytesIO()
@@ -1463,3 +1483,13 @@ this is the content of the fake file
         self.assertEqual(rtn, ("2001::8ffa:fe22:b3af", None))
         rtn = IS_IPADDRESS(subnets="invalidsubnet")("2001::8ffa:fe22:b3af")
         self.assertEqual(rtn, ("2001::8ffa:fe22:b3af", "invalid subnet provided"))
+
+    def test_IS_SAFE(self):
+        rtn = IS_SAFE()("<div>test</div>")
+        ("<div></div>", None)
+
+        rtn = IS_SAFE()("<div><script>xxx</script></div>")
+        ("<div><script>xxx</script></div>", "Unsafe Content")
+
+        rtn = IS_SAFE(mode="sanitize")("<div><script>xxx</script></div>")
+        ("<div>xxx</div>", "Unsafe Content")

@@ -124,6 +124,7 @@ For more info::
 
 """
 
+import contextlib
 import glob
 import logging
 import socket
@@ -134,33 +135,39 @@ import urllib
 
 from ._compat import (
     PY2,
-    pickle,
-    hashlib_md5,
-    pjoin,
     copyreg,
+    hashlib_md5,
     integer_types,
-    with_metaclass,
-    long,
-    unquote,
     iteritems,
+    long,
+    pickle,
+    pjoin,
+    unquote,
+    with_metaclass,
 )
-from ._globals import GLOBAL_LOCKER, THREAD_LOCAL, DEFAULT
+from ._globals import DEFAULT, GLOBAL_LOCKER, THREAD_LOCAL
 from ._load import OrderedDict
-from .helpers.classes import (
-    Serializable,
-    SQLCallableList,
-    BasicStorage,
-    RecordUpdater,
-    RecordDeleter,
-    TimingHandler,
-)
-from .helpers.methods import hide_password, smart_query, auto_validators, auto_represent, uuidstr
-from .helpers.regex import REGEX_PYTHON_KEYWORDS, REGEX_DBNAME
-from .helpers.rest import RestParser
-from .helpers.serializers import serializers
-from .objects import Table, Field, Rows, Row, Set
 from .adapters.base import BaseAdapter, NullAdapter
 from .default_validators import default_validators
+from .helpers.classes import (
+    BasicStorage,
+    RecordDeleter,
+    RecordUpdater,
+    Serializable,
+    SQLCallableList,
+    TimingHandler,
+)
+from .helpers.methods import (
+    auto_represent,
+    auto_validators,
+    hide_password,
+    smart_query,
+    uuidstr,
+)
+from .helpers.regex import REGEX_DBNAME, REGEX_PYTHON_KEYWORDS
+from .helpers.rest import RestParser
+from .helpers.serializers import serializers
+from .objects import Field, Row, Rows, Set, Table
 
 TABLE_ARGS = set(
     (
@@ -243,8 +250,8 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
             web2py. Use an explicit path when using DAL outside web2py
         db_codec: string encoding of the database (default: 'UTF-8')
         table_hash: database identifier with .tables. If your connection hash
-                    change you can still using old .tables if they have db_hash
-                    as prefix
+                    change you can still using old .tables if they have
+                    table_hash as prefix
         check_reserved: list of adapters to check tablenames and column names
             against sql/nosql reserved keywords. Defaults to `None`
 
@@ -288,7 +295,7 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
     validators = None
     representers = {}
     validators_method = default_validators
-    uuid = uuidstr
+    uuid = staticmethod(uuidstr)
     logger = logging.getLogger("pyDAL")
 
     Field = Field
@@ -372,15 +379,15 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
     def distributed_transaction_begin(*instances):
         if not instances:
             return
-        thread_key = "%s.%s" % (socket.gethostname(), threading.currentThread())
-        keys = ["%s.%i" % (thread_key, i) for (i, db) in instances]
+        thread_key = "%s.%s" % (socket.gethostname(), threading.current_thread())
         instances = enumerate(instances)
-        for (i, db) in instances:
+        keys = ["%s.%i" % (thread_key, i) for (i, db) in instances]
+        for i, db in instances:
             if not db._adapter.support_distributed_transaction():
                 raise SyntaxError(
                     "distributed transaction not suported by %s" % db._dbname
                 )
-        for (i, db) in instances:
+        for i, db in instances:
             db._adapter.distributed_transaction_begin(keys[i])
 
     @staticmethod
@@ -388,22 +395,22 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
         if not instances:
             return
         instances = enumerate(instances)
-        thread_key = "%s.%s" % (socket.gethostname(), threading.currentThread())
+        thread_key = "%s.%s" % (socket.gethostname(), threading.current_thread())
         keys = ["%s.%i" % (thread_key, i) for (i, db) in instances]
-        for (i, db) in instances:
+        for i, db in instances:
             if not db._adapter.support_distributed_transaction():
                 raise SyntaxError(
                     "distributed transaction not suported by %s" % db._dbanme
                 )
         try:
-            for (i, db) in instances:
+            for i, db in instances:
                 db._adapter.prepare(keys[i])
         except:
-            for (i, db) in instances:
+            for i, db in instances:
                 db._adapter.rollback_prepared(keys[i])
             raise RuntimeError("failure to commit distributed transaction")
         else:
-            for (i, db) in instances:
+            for i, db in instances:
                 db._adapter.commit_prepared(keys[i])
         return
 
@@ -433,7 +440,6 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
         entity_quoting=True,
         table_hash=None,
     ):
-
         if uri == "<zombie>" and db_uid is not None:
             return
         super(DAL, self).__init__()
@@ -508,6 +514,9 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
                         # self._adapter.ignore_field_case = ignore_field_case
                         if bigint_id:
                             self._adapter.dialect._force_bigints()
+                        # if there are multiple URIs to try in sequence, do not defer connection
+                        if len(uris) > 1:
+                            self._adapter.connector()
                         connected = True
                         break
                     except SyntaxError:
@@ -554,6 +563,18 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
         if auto_import or tables:
             self.import_table_definitions(adapter.folder, tables=tables)
 
+    @contextlib.contextmanager
+    def single_transaction(self):
+        self._adapter.reconnect()
+        try:
+            yield self
+        except Exception:
+            self._adapter.rollback()
+        else:
+            self._adapter.commit()
+        finally:
+            self.close()
+
     @property
     def tables(self):
         return self._tables
@@ -596,7 +617,7 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
                     self.define_table(
                         name,
                         *[item[1] for item in mf],
-                        **dict(migrate=migrate, fake_migrate=fake_migrate)
+                        **dict(migrate=migrate, fake_migrate=fake_migrate),
                     )
                 finally:
                     self._adapter.migrator.file_close(tfile)
@@ -643,7 +664,7 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
                 raise SyntaxError("table already defined: %s" % tablename)
         elif (
             tablename.startswith("_")
-            or tablename in dir(self)
+            or hasattr(self, tablename)
             or REGEX_PYTHON_KEYWORDS.match(tablename)
         ):
             raise SyntaxError("invalid table name: %s" % tablename)
@@ -735,7 +756,7 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
                         "lazy_tables",
                     ]
                 ]
-            )
+            ),
         )
         for table in self:
             db_as_dict["tables"].append(table.as_dict(flat=flat, sanitize=sanitize))
@@ -811,6 +832,12 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
             if not db_group:
                 del THREAD_LOCAL._pydal_db_instances_[self._db_uid]
         self._adapter._clean_tlocals()
+
+    def get_connection_from_pool_or_new(self):
+        self._adapter.reconnect()
+
+    def recycle_connection_in_pool_or_close(self, action="commit"):
+        self._adapter.close(action, really=True)
 
     def executesql(
         self,
@@ -922,7 +949,7 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
             else:
                 #: extracted_fields is empty we should make it from colnames
                 # what 'col_fields' is for
-                col_fields = [] # [[tablename, fieldname], ....]
+                col_fields = []  # [[tablename, fieldname], ....]
                 newcolnames = []
                 for tf in colnames:
                     if "." in tf:
@@ -936,8 +963,9 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
                 colnames = newcolnames
             data = adapter.parse(
                 data,
-                fields = extracted_fields or [tf and self[tf[0]][tf[1]] for tf in col_fields],
-                colnames=colnames
+                fields=extracted_fields
+                or [tf and self[tf[0]][tf[1]] for tf in col_fields],
+                colnames=colnames,
             )
         return data
 
@@ -954,7 +982,7 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
         return self.representers[name](*args, **kwargs)
 
     def export_to_csv_file(self, ofile, *args, **kwargs):
-        step = long(kwargs.get("max_fetch_rows,", 500))
+        step = long(kwargs.get("max_fetch_rows", 500))
         write_colnames = kwargs["write_colnames"] = kwargs.get("write_colnames", True)
         for table in self.tables:
             ofile.write("TABLE %s\r\n" % table)
@@ -978,7 +1006,7 @@ class DAL(with_metaclass(MetaDAL, Serializable, BasicStorage)):
         map_tablenames=None,
         ignore_missing_tables=False,
         *args,
-        **kwargs
+        **kwargs,
     ):
         # if id_map is None: id_map={}
         id_offset = {}  # only used if id_map is None

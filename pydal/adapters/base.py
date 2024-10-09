@@ -3,43 +3,43 @@ import sys
 import types
 from collections import defaultdict
 from contextlib import contextmanager
+
 from .._compat import (
     PY2,
-    with_metaclass,
-    iterkeys,
-    iteritems,
+    basestring,
     hashlib_md5,
     integer_types,
-    basestring,
+    iteritems,
+    iterkeys,
+    with_metaclass,
 )
 from .._globals import IDENTITY
 from ..connection import ConnectionPool
 from ..exceptions import NotOnNOSQLError
 from ..helpers.classes import (
-    Reference,
-    ExecutionHandler,
-    SQLCustomType,
     SQLALL,
+    ExecutionHandler,
     NullDriver,
+    Reference,
+    SQLCustomType,
 )
-from ..helpers.methods import use_common_filters, xorify, merge_tablemaps
+from ..helpers.methods import merge_tablemaps, use_common_filters, xorify
 from ..helpers.regex import REGEX_SELECT_AS_PARSER, REGEX_TABLE_DOT_FIELD
 from ..migrator import Migrator
 from ..objects import (
-    Table,
-    Field,
     Expression,
+    Field,
+    IterRows,
+    LazyReferenceGetter,
+    LazySet,
     Query,
     Rows,
-    IterRows,
-    LazySet,
-    LazyReferenceGetter,
-    VirtualCommand,
     Select,
+    Table,
+    VirtualCommand,
 )
 from ..utils import deprecated
 from . import AdapterMeta, with_connection, with_connection_or_raise
-
 
 CALLABLETYPES = (
     types.LambdaType,
@@ -261,7 +261,7 @@ class BaseAdapter(with_metaclass(AdapterMeta, ConnectionPool)):
         new_row = defaultdict(self.db.Row)
         extras = self.db.Row()
         #: let's loop over columns
-        for (j, colname) in enumerate(colnames):
+        for j, colname in enumerate(colnames):
             value = row[j]
             tmp = tmps[j]
             tablename = None
@@ -280,18 +280,18 @@ class BaseAdapter(with_metaclass(AdapterMeta, ConnectionPool)):
                 #: additional parsing for 'id' fields
                 if ft == "id" and not cacheable:
                     self._add_operators_to_parsed_row(value, table, colset)
-                    #: table may be 'nested_select' which doesn't have '_reference_by'
-                    if hasattr(table, '_reference_by'):
+                    #: table may be 'nested_select' which doesn't have '_referenced_by'
+                    if hasattr(table, "_referenced_by"):
                         self._add_reference_sets_to_parsed_row(
                             value, table, tablename, colset
                         )
             #: otherwise we set the value in extras
             else:
                 #: fields[j] may be None if only 'colnames' was specified in db.executesql()
-                f_itype, ftype = fields[j] and [fields[j]._itype, fields[j].type] or [None, None]
-                value = self.parse_value(
-                    value, f_itype, ftype, blob_decode
+                f_itype, ftype = (
+                    fields[j] and [fields[j]._itype, fields[j].type] or [None, None]
                 )
+                value = self.parse_value(value, f_itype, ftype, blob_decode)
                 extras[colname] = value
                 if not fields[j]:
                     new_row[colname] = value
@@ -668,7 +668,14 @@ class SQLAdapter(BaseAdapter):
         cache=None,
         cacheable=None,
         processor=None,
+        cte_collector=None,
     ):
+        if cte_collector is None:
+            cte_collector = dict(stack=[], seen=set(), is_recursive=False)
+            is_toplevel = True
+        else:
+            is_toplevel = False
+
         #: parse tablemap
         tablemap = self.tables(query)
         #: apply common filters if needed
@@ -682,6 +689,7 @@ class SQLAdapter(BaseAdapter):
             tablemap.pop(item, None)
         if len(tablemap) < 1:
             raise SyntaxError("Set: no tables selected")
+
         query_tables = list(tablemap)
         #: check for_update argument
         # [Note - gi0baro] I think this should be removed since useless?
@@ -723,19 +731,23 @@ class SQLAdapter(BaseAdapter):
         if join and not left:
             cross_joins = iexcluded + list(itables_to_merge)
             tokens = [table_alias(cross_joins[0])]
-            tokens += [
-                self.dialect.cross_join(table_alias(t), query_env)
-                for t in cross_joins[1:]
-            ]
-            tokens += [self.dialect.join(t, query_env) for t in ijoin_on]
+            tokens.extend(
+                [
+                    self.dialect.cross_join(table_alias(t), query_env)
+                    for t in cross_joins[1:]
+                ]
+            )
+            tokens.extend([self.dialect.join(t, query_env) for t in ijoin_on])
             sql_t = " ".join(tokens)
         elif not join and left:
             cross_joins = excluded + list(tables_to_merge)
             tokens = [table_alias(cross_joins[0])]
-            tokens += [
-                self.dialect.cross_join(table_alias(t), query_env)
-                for t in cross_joins[1:]
-            ]
+            tokens.extend(
+                [
+                    self.dialect.cross_join(table_alias(t), query_env)
+                    for t in cross_joins[1:]
+                ]
+            )
             # FIXME: WTF? This is not correct syntax at least on PostgreSQL
             if join_tables:
                 tokens.append(
@@ -743,7 +755,7 @@ class SQLAdapter(BaseAdapter):
                         ",".join([table_alias(t) for t in join_tables]), query_env
                     )
                 )
-            tokens += [self.dialect.left_join(t, query_env) for t in join_on]
+            tokens.extend([self.dialect.left_join(t, query_env) for t in join_on])
             sql_t = " ".join(tokens)
         elif join and left:
             all_tables_in_query = set(
@@ -754,11 +766,13 @@ class SQLAdapter(BaseAdapter):
                 all_tables_in_query.difference(tables_in_joinon)
             )
             tokens = [table_alias(tables_not_in_joinon[0])]
-            tokens += [
-                self.dialect.cross_join(table_alias(t), query_env)
-                for t in tables_not_in_joinon[1:]
-            ]
-            tokens += [self.dialect.join(t, query_env) for t in ijoin_on]
+            tokens.extend(
+                [
+                    self.dialect.cross_join(table_alias(t), query_env)
+                    for t in tables_not_in_joinon[1:]
+                ]
+            )
+            tokens.extend([self.dialect.join(t, query_env) for t in ijoin_on])
             # FIXME: WTF? This is not correct syntax at least on PostgreSQL
             if join_tables:
                 tokens.append(
@@ -766,7 +780,7 @@ class SQLAdapter(BaseAdapter):
                         ",".join([table_alias(t) for t in join_tables]), query_env
                     )
                 )
-            tokens += [self.dialect.left_join(t, query_env) for t in join_on]
+            tokens.extend([self.dialect.left_join(t, query_env) for t in join_on])
             sql_t = " ".join(tokens)
         else:
             sql_t = ", ".join(table_alias(t) for t in query_tables)
@@ -803,13 +817,20 @@ class SQLAdapter(BaseAdapter):
                     tablemap[t][x].sqlsafe
                     for t in query_tables
                     if not isinstance(tablemap[t], Select)
-                    for x in (
-                        hasattr(tablemap[t], "_primarykey")
-                        and tablemap[t]._primarykey
-                        or ["_id"]
-                    )
+                    for x in (getattr(tablemap[t], "_primarykey", None) or ["_id"])
                 ]
             )
+
+        #: build CTE
+        [t.cte(cte_collector) for t in tablemap.values() if getattr(t, "is_cte", None)]
+        if is_toplevel and cte_collector["stack"]:
+            with_cte = [
+                cte_collector["is_recursive"],
+                ", ".join(cte_collector["stack"]),
+            ]
+        else:
+            with_cte = None
+
         #: build sql using dialect
         return (
             colnames,
@@ -823,6 +844,7 @@ class SQLAdapter(BaseAdapter):
                 limitby,
                 distinct,
                 for_update and self.can_select_for_update,
+                with_cte,
             ),
         )
 
@@ -966,8 +988,8 @@ class SQLAdapter(BaseAdapter):
             raise RuntimeError(err % (index_name, str(e), sql))
         return True
 
-    def drop_index(self, table, index_name):
-        sql = self.dialect.drop_index(index_name, table)
+    def drop_index(self, table, index_name, if_exists=False):
+        sql = self.dialect.drop_index(index_name, table, if_exists)
         try:
             self.execute(sql)
             self.commit()

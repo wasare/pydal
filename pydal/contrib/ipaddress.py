@@ -10,7 +10,6 @@ and networks.
 
 from __future__ import unicode_literals
 
-
 import itertools
 import struct
 
@@ -31,7 +30,6 @@ if b"\0"[0] == 0:  # Python 3 semantics
 
     def _compat_bytes_to_byte_vals(byt):
         return byt
-
 
 else:
 
@@ -56,11 +54,11 @@ def _compat_to_bytes(intval, length, endianess):
     assert isinstance(intval, _compat_int_types)
     assert endianess == "big"
     if length == 4:
-        if intval < 0 or intval >= 2 ** 32:
+        if intval < 0 or intval >= 2**32:
             raise struct.error("integer out of range for 'I' format code")
         return struct.pack(b"!I", intval)
     elif length == 16:
-        if intval < 0 or intval >= 2 ** 128:
+        if intval < 0 or intval >= 2**128:
             raise struct.error("integer out of range for 'QQ' format code")
         return struct.pack(b"!QQ", intval >> 64, intval & 0xFFFFFFFFFFFFFFFF)
     else:
@@ -71,7 +69,6 @@ if hasattr(int, "bit_length"):
     # Not int.bit_length , since that won't work in 2.7 where long exists
     def _compat_bit_length(i):
         return i.bit_length()
-
 
 else:
 
@@ -529,10 +526,10 @@ class _IPAddressBase(_TotalOrderingMixin):
     @property
     def reverse_pointer(self):
         """The name of the reverse DNS pointer for the IP address, e.g.:
-            >>> ipaddress.ip_address("127.0.0.1").reverse_pointer
-            '1.0.0.127.in-addr.arpa'
-            >>> ipaddress.ip_address("2001:db8::1").reverse_pointer
-            '1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa'
+        >>> ipaddress.ip_address("127.0.0.1").reverse_pointer
+        '1.0.0.127.in-addr.arpa'
+        >>> ipaddress.ip_address("2001:db8::1").reverse_pointer
+        '1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa'
 
         """
         return self._reverse_pointer()
@@ -1226,7 +1223,7 @@ class _BaseV4(object):
     __slots__ = ()
     _version = 4
     # Equivalent to 255.255.255.255 or 32 bits of 1's.
-    _ALL_ONES = (2 ** IPV4LENGTH) - 1
+    _ALL_ONES = (2**IPV4LENGTH) - 1
     _DECIMAL_DIGITS = frozenset("0123456789")
 
     # the valid octets for host and netmasks. only useful for IPv4.
@@ -1389,7 +1386,6 @@ class IPv4Address(_BaseV4, _BaseAddress):
     __slots__ = ("_ip", "__weakref__")
 
     def __init__(self, address):
-
         """
         Args:
             address: A string or integer representing the IP
@@ -1433,9 +1429,9 @@ class IPv4Address(_BaseV4, _BaseAddress):
     def is_reserved(self):
         """Test if the address is otherwise IETF reserved.
 
-         Returns:
-             A boolean, True if the address is within the
-             reserved IPv4 Network range.
+        Returns:
+            A boolean, True if the address is within the
+            reserved IPv4 Network range.
 
         """
         return self in self._constants._reserved_network
@@ -1592,7 +1588,6 @@ class IPv4Network(_BaseV4, _BaseNetwork):
     _address_class = IPv4Address
 
     def __init__(self, address, strict=True):
-
         """Instantiate a new IPv4 network object.
 
         Args:
@@ -1696,7 +1691,6 @@ class IPv4Network(_BaseV4, _BaseNetwork):
 
 
 class _IPv4Constants(object):
-
     _linklocal_network = IPv4Network("169.254.0.0/16")
 
     _loopback_network = IPv4Network("127.0.0.0/8")
@@ -1741,7 +1735,7 @@ class _BaseV6(object):
 
     __slots__ = ()
     _version = 6
-    _ALL_ONES = (2 ** IPV6LENGTH) - 1
+    _ALL_ONES = (2**IPV6LENGTH) - 1
     _HEXTET_COUNT = 8
     _HEX_DIGITS = frozenset("0123456789ABCDEFabcdef")
     _max_prefixlen = IPV6LENGTH
@@ -2375,8 +2369,8 @@ class IPv6Network(_BaseV6, _BaseNetwork):
     def hosts(self):
         """Generate Iterator over usable hosts in a network.
 
-          This is like __iter__ except it doesn't return the
-          Subnet-Router anycast address.
+        This is like __iter__ except it doesn't return the
+        Subnet-Router anycast address.
 
         """
         network = int(self.network_address)
@@ -2402,7 +2396,6 @@ class IPv6Network(_BaseV6, _BaseNetwork):
 
 
 class _IPv6Constants(object):
-
     _linklocal_network = IPv6Network("fe80::/10")
 
     _multicast_network = IPv6Network("ff00::/8")

@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 
-from ._compat import unittest
-from ._adapt import DEFAULT_URI, drop, IS_MSSQL, IS_IMAP, IS_GAE, IS_TERADATA, IS_ORACLE
+import shutil
+import tempfile
+
 from pydal import DAL, Field
 from pydal._compat import PY2
+
+from ._adapt import DEFAULT_URI, IS_GAE, IS_IMAP, IS_MSSQL, IS_ORACLE, IS_TERADATA, drop
+from ._compat import unittest
 
 
 @unittest.skipIf(IS_IMAP, "Reference not Null unsupported on IMAP")
@@ -197,3 +201,22 @@ class TestNullAdapter(unittest.TestCase):
         self.assertIsInstance(db.no_table.aa, Field)
         self.assertIsInstance(db.no_table["aa"], Field)
         db.close()
+
+
+@unittest.skip("")
+class TestSingleTransaction(unittest.TestCase):
+    def test_single_transaction(self):
+        db = DAL(DEFAULT_URI)
+        db.define_table("tt", Field("aa"))
+        self.assertEqual(db(db.tt).count(), 0)
+        db.commit()
+        try:
+            with db.single_transaction():
+                db.tt.insert(aa="test")
+                1 / 0
+        except ZeroDivisionError:
+            pass
+        self.assertEqual(db(db.tt).count(), 0)
+        with db.single_transaction():
+            db.tt.insert(aa="test")
+        self.assertEqual(db(db.tt).count(), 1)

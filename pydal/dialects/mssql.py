@@ -1,18 +1,18 @@
 from .._compat import basestring
 from ..adapters.mssql import (
     MSSQL,
-    MSSQLN,
     MSSQL3,
-    MSSQL4,
     MSSQL3N,
+    MSSQL4,
     MSSQL4N,
-    Vertica,
+    MSSQLN,
     Sybase,
+    Vertica,
 )
 from ..helpers.methods import varquote_aux
 from ..objects import Expression
-from .base import SQLDialect
 from . import dialects, sqltype_for
+from .base import SQLDialect
 
 
 @dialects.register_for(MSSQL)
@@ -136,6 +136,7 @@ class MSSQLDialect(SQLDialect):
         limitby=None,
         distinct=False,
         for_update=False,
+        with_cte=None,  # ['recursive' | '', sql]
     ):
         dst, whr, grp, order, limit, upd = "", "", "", "", "", ""
         if distinct is True:
@@ -155,7 +156,16 @@ class MSSQLDialect(SQLDialect):
             limit = " TOP %i" % lmax
         if for_update:
             upd = " FOR UPDATE"
-        return "SELECT%s%s %s FROM %s%s%s%s%s;" % (
+
+        if with_cte:
+            recursive, cte = with_cte
+            recursive = " RECURSIVE" if recursive else ""
+            with_cte = "WITH%s %s " % (recursive, cte)
+        else:
+            with_cte = ""
+
+        return "%sSELECT%s%s %s FROM %s%s%s%s%s;" % (
+            with_cte,
             dst,
             limit,
             fields,
@@ -195,7 +205,7 @@ class MSSQLDialect(SQLDialect):
         tmp = (self.expand(x, "string", query_env=query_env) for x in items)
         return "(%s)" % " + ".join(tmp)
 
-    def regexp(self, first, second, query_env={}):
+    def regexp(self, first, second, match_parameter=None, query_env={}):
         second = self.expand(second, "string", query_env=query_env)
         second = second.replace("\\", "\\\\")
         second = second.replace(r"%", r"\%").replace("*", "%").replace(".", "_")
@@ -237,7 +247,7 @@ class MSSQLDialect(SQLDialect):
     def concat_add(self, tablename):
         return "; ALTER TABLE %s ADD " % tablename
 
-    def drop_index(self, name, table):
+    def drop_index(self, name, table, if_exists=False):
         return "DROP INDEX %s ON %s;" % (self.quote(name), table._rname)
 
     def st_astext(self, first, query_env={}):
@@ -359,6 +369,7 @@ class MSSQL3Dialect(MSSQLDialect):
         limitby=None,
         distinct=False,
         for_update=False,
+        with_cte=None,  # ['recursive' | '', sql]
     ):
         dst, whr, grp, order, limit, offset, upd = "", "", "", "", "", "", ""
         if distinct is True:
@@ -383,7 +394,16 @@ class MSSQL3Dialect(MSSQLDialect):
                 )
         if for_update:
             upd = " FOR UPDATE"
-        return "SELECT%s %s FROM %s%s%s%s%s%s%s;" % (
+
+        if with_cte:
+            recursive, cte = with_cte
+            recursive = " RECURSIVE" if recursive else ""
+            with_cte = "WITH%s %s " % (recursive, cte)
+        else:
+            with_cte = ""
+
+        return "%sSELECT%s %s FROM %s%s%s%s%s%s%s;" % (
+            with_cte,
             dst,
             fields,
             tables,
@@ -409,6 +429,7 @@ class MSSQL4Dialect(MSSQL3Dialect):
         limitby=None,
         distinct=False,
         for_update=False,
+        with_cte=None,  # ['recursive' | '', sql]
     ):
         dst, whr, grp, order, limit, offset, upd = "", "", "", "", "", "", ""
         if distinct is True:
@@ -436,7 +457,16 @@ class MSSQL4Dialect(MSSQL3Dialect):
                 )
         if for_update:
             upd = " FOR UPDATE"
-        return "SELECT%s %s FROM %s%s%s%s%s%s%s;" % (
+
+        if with_cte:
+            recursive, cte = with_cte
+            recursive = " RECURSIVE" if recursive else ""
+            with_cte = "WITH%s %s " % (recursive, cte)
+        else:
+            with_cte = ""
+
+        return "%sSELECT%s %s FROM %s%s%s%s%s%s%s;" % (
+            with_cte,
             dst,
             fields,
             tables,

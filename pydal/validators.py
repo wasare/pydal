@@ -11,40 +11,39 @@
 Validators
 -----------
 """
-import os
-import re
-import math
-import datetime
-import time
+import binascii
 import cgi
-import uuid
+import datetime
+import decimal
+import encodings.idna
 import hashlib
 import hmac
 import json
+import math
+import os
+import re
 import struct
-import decimal
-import binascii
+import time
 import unicodedata
-import encodings.idna
+import uuid
 from functools import reduce
 
 from ._compat import (
+    PY2,
     StringIO,
-    integer_types,
     basestring,
+    integer_types,
+    ipaddress,
+    string_types,
+    to_bytes,
+    to_native,
+    to_unicode,
+    unichr,
     unicodeT,
     urllib_unquote,
-    unichr,
-    to_bytes,
-    PY2,
-    to_unicode,
-    to_native,
-    string_types,
     urlparse,
-    ipaddress,
 )
-from .objects import Field, FieldVirtual, FieldMethod, Table
-
+from .objects import Field, FieldMethod, FieldVirtual, Table
 
 JSONErrors = (NameError, TypeError, ValueError, AttributeError, KeyError)
 
@@ -79,6 +78,7 @@ __all__ = [
     "IS_NOT_EMPTY",
     "IS_NOT_IN_DB",
     "IS_NULL_OR",
+    "IS_SAFE",
     "IS_SLUG",
     "IS_STRONG",
     "IS_TIME",
@@ -215,7 +215,6 @@ class IS_MATCH(Validator):
         extract=False,
         is_unicode=False,
     ):
-
         if strict or not search:
             if not expression.startswith("^"):
                 expression = "^(%s)" % expression
@@ -478,31 +477,33 @@ class IS_IN_SET(Validator):
         zero="",
         sort=False,
     ):
-
-        self.multiple = multiple
-        if isinstance(theset, dict):
-            self.theset = [str(item) for item in theset]
-            self.labels = list(theset.values())
-        elif (
-            theset
-            and isinstance(theset, (tuple, list))
-            and isinstance(theset[0], (tuple, list))
-            and len(theset[0]) == 2
-        ):
-            self.theset = [str(item) for item, label in theset]
-            self.labels = [str(label) for item, label in theset]
-        else:
-            self.theset = [str(item) for item in theset]
-            self.labels = labels
+        self.theset = theset
+        self.labels = labels
         self.error_message = error_message
+        self.multiple = multiple
         self.zero = zero
         self.sort = sort
 
     def options(self, zero=True):
-        if not self.labels:
-            items = [(k, k) for (i, k) in enumerate(self.theset)]
+        # could be a lasy set
+        iset = self.theset() if callable(self.theset) else self.theset
+        # this could be an interator
+        if isinstance(iset, dict):
+            theset = map(str, iset)
+            labels = list(iset.values())
         else:
-            items = [(k, list(self.labels)[i]) for (i, k) in enumerate(self.theset)]
+            # in case theset is an iterator
+            iset = list(iset)
+            if iset and isinstance(iset[0], (list, tuple)) and len(iset[0]) == 2:
+                labels = [str(label) for _, label in iset]
+                theset = [str(key) for key, _ in iset]
+            else:
+                theset = map(str, iset)
+                labels = self.labels
+        if not labels:
+            items = [(k, k) for (i, k) in enumerate(theset)]
+        else:
+            items = [(k, list(labels)[i]) for (i, k) in enumerate(theset)]
         if self.sort:
             items.sort(key=lambda o: str(o[1]).upper())
         if zero and self.zero is not None and not self.multiple:
@@ -510,6 +511,7 @@ class IS_IN_SET(Validator):
         return items
 
     def validate(self, value, record_id=None):
+        valuemap = dict(self.options(zero=False))
         if self.multiple:
             # if below was values = re.compile("[\w\-:]+").findall(str(value))
             if not value:
@@ -518,20 +520,16 @@ class IS_IN_SET(Validator):
                 values = value
             else:
                 values = [value]
+            if isinstance(self.multiple, (tuple, list)):
+                if not self.multiple[0] <= len(values) < self.multiple[1]:
+                    raise ValidationError(self.translator(self.error_message))
         else:
             values = [value]
-        thestrset = [str(x) for x in self.theset]
-        failures = [x for x in values if not str(x) in thestrset]
+        strkeys = map(str, valuemap)
+        failures = [x for x in values if not str(x) in strkeys]
         if failures and self.theset:
             raise ValidationError(self.translator(self.error_message))
-        if self.multiple:
-            if (
-                isinstance(self.multiple, (tuple, list))
-                and not self.multiple[0] <= len(values) < self.multiple[1]
-            ):
-                raise ValidationError(self.translator(self.error_message))
-            return values
-        return value
+        return values if self.multiple else value
 
 
 class IS_IN_DB(Validator):
@@ -566,22 +564,35 @@ class IS_IN_DB(Validator):
         delimiter=None,
         auto_add=False,
     ):
-
         if hasattr(dbset, "define_table"):
             self.dbset = dbset()
         else:
             self.dbset = dbset
 
+        table = None
         if isinstance(field, Table):
-            field = field._id
+            table = field
+            field = table._id
+            fname = str(field)
+        if isinstance(field, Field):
+            fname = str(field)
         elif isinstance(field, str):
             items = field.split(".")
-            if len(items) == 1:
-                field = items[0] + ".id"
-
-        (ktable, kfield) = str(field).split(".")
+            if len(items) == 1 or items[1] == "id":
+                table = self.dbset._db.get(items[0])
+                fname = items[0] + ".id"
+            else:
+                fname = field
+        else:
+            raise RuntimeError("IS_IN_DB: a field argument must be specified")
+        (ktable, kfield) = fname.split(".")
         if not label:
-            label = "%%(%s)s" % kfield
+            # if we have a table and it has a _format, use it
+            if table and table._format:
+                label = table._format
+            # else format using the field value
+            else:
+                label = "%%(%s)s" % kfield
         if isinstance(label, str):
             m = re.match(self.REGEX_TABLE_DOT_FIELD, label)
             if m:
@@ -705,7 +716,7 @@ class IS_IN_DB(Validator):
             ):
                 raise ValidationError(self.translator(self.error_message))
             if self.theset:
-                if not [v for v in values if v not in self.theset]:
+                if not [v for v in values if str(v) not in self.theset]:
                     return values
             else:
 
@@ -766,7 +777,6 @@ class IS_NOT_IN_DB(Validator):
         allowed_override=[],
         ignore_common_filters=False,
     ):
-
         if isinstance(field, Table):
             field = field._id
 
@@ -820,7 +830,7 @@ def range_error_message(error_message, what_to_enter, minimum, maximum):
             error_message += " less than or equal to %(max)g"
     if type(maximum) in integer_types:
         maximum -= 1
-    return translate(error_message) % dict(min=minimum, max=maximum)
+    return str(translate(error_message)) % dict(min=minimum, max=maximum)
 
 
 class IS_INT_IN_RANGE(Validator):
@@ -866,7 +876,6 @@ class IS_INT_IN_RANGE(Validator):
     REGEX_INT = r"^[+-]?\d+$"
 
     def __init__(self, minimum=None, maximum=None, error_message=None):
-
         self.minimum = int(minimum) if minimum is not None else None
         self.maximum = int(maximum) if maximum is not None else None
         self.error_message = error_message
@@ -935,7 +944,6 @@ class IS_FLOAT_IN_RANGE(Validator):
     """
 
     def __init__(self, minimum=None, maximum=None, error_message=None, dot="."):
-
         self.minimum = float(minimum) if minimum is not None else None
         self.maximum = float(maximum) if maximum is not None else None
         self.dot = str(dot)
@@ -1020,7 +1028,6 @@ class IS_DECIMAL_IN_RANGE(Validator):
     """
 
     def __init__(self, minimum=None, maximum=None, error_message=None, dot="."):
-
         self.minimum = decimal.Decimal(str(minimum)) if minimum is not None else None
         self.maximum = decimal.Decimal(str(maximum)) if maximum is not None else None
         self.dot = str(dot)
@@ -1105,6 +1112,45 @@ class IS_NOT_EMPTY(Validator):
         if empty:
             raise ValidationError(self.translator(self.error_message))
         return value
+
+
+class IS_SAFE(Validator):
+    """
+    Example:
+        Used as::
+
+            Field("html", 'text', requires=IS_SAFE())
+
+            >>> IS_SAFE()("<div></div>")
+            ("<div></div>, None)
+            >>> from py4web import XML
+            >>> sanitizer = lambda text: XML(text, sanitize=True)
+            >>> IS_SAFE(sanitizer, mode="error")("<script></script>")
+            ("<script></script>", "Unsafe Content")
+            >>> IS_SAFE(sanitizer, node="sanitize")("<script></script>")
+            ("", None)
+    """
+
+    def __init__(self, sanitizer=None, error_message="Unsafe Content", mode="error"):
+        self.sanitizer = sanitizer or IS_SAFE.default_sanitizer
+        self.error_message = error_message
+        assert mode in ("error", "sanitize")
+        self.mode = mode
+
+    def validate(self, value, record_id=None):
+        sanitized_value = self.sanitizer(value)
+        if sanitized_value != value and self.mode == "error":
+            raise ValidationError(self.translator(self.error_message))
+        return sanitized_value
+
+    default_regex = re.compile(
+        r"(<\s*/?(script|embed|object|iframe|textarea|input|button).*>)|(<[^>]+ on\w+[^>]+>)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    @staticmethod
+    def default_sanitizer(text):
+        return IS_SAFE.default_regex.sub("", text)
 
 
 class IS_ALPHANUMERIC(IS_MATCH):
@@ -1456,11 +1502,10 @@ http_schemes = [None, "http", "https"]
 # Defined in RFC 3490, Section 3.1, Requirement #1
 # Use this regex to split the authority component of a unicode URL into
 # its component labels
-REGEX_AUTHORITY_SPLITTER = u"[\u002e\u3002\uff0e\uff61]"
+REGEX_AUTHORITY_SPLITTER = "[\u002e\u3002\uff0e\uff61]"
 
 
 def escape_unicode(string):
-
     """
     Converts a unicode string into US-ASCII, using a simple conversion scheme.
     Each unicode character that does not have a US-ASCII equivalent is
@@ -1501,11 +1546,11 @@ def unicode_to_ascii_authority(authority):
             e.g. u'www.Alliancefran\\xe7aise.nu'
 
     Returns:
-        string: the US-ASCII character equivalent to the inputed authority,
+        string: the US-ASCII character equivalent to the inputted authority,
              e.g. 'www.xn--alliancefranaise-npb.nu'
 
     Raises:
-        Exception: if the function is not able to convert the inputed
+        Exception: if the function is not able to convert the inputted
             authority
 
     @author: Jonathan Benn
@@ -1537,7 +1582,7 @@ def unicode_to_ascii_authority(authority):
 
 def unicode_to_ascii_url(url, prepend_scheme):
     """
-    Converts the inputed unicode url into a US-ASCII equivalent. This function
+    Converts the inputted unicode url into a US-ASCII equivalent. This function
     goes a little beyond RFC 3490, which is limited in scope to the domain name
     (authority) only. Here, the functionality is expanded to what was observed
     on Wikipedia on 2009-Jan-22:
@@ -1563,7 +1608,7 @@ def unicode_to_ascii_url(url, prepend_scheme):
             e.g. "http". Input None to disable this functionality
 
     Returns:
-        string: a US-ASCII equivalent of the inputed url
+        string: a US-ASCII equivalent of the inputted url
 
     @author: Jonathan Benn
     """
@@ -1575,7 +1620,7 @@ def unicode_to_ascii_url(url, prepend_scheme):
     if not components.netloc:
         # Try appending a scheme to see if that fixes the problem
         scheme_to_prepend = prepend_scheme or "http"
-        components = urlparse.urlparse(to_unicode(scheme_to_prepend) + u"://" + url)
+        components = urlparse.urlparse(to_unicode(scheme_to_prepend) + "://" + url)
         prepended = True
 
     # if we still can't find the authority
@@ -1646,7 +1691,7 @@ class IS_GENERIC_URL(Validator):
         error_message: a string, the error message to give the end user
             if the URL does not validate
         allowed_schemes: a list containing strings or None. Each element
-            is a scheme the inputed URL is allowed to use
+            is a scheme the inputted URL is allowed to use
         prepend_scheme: a string, this scheme is prepended if it's
             necessary to make the URL valid
 
@@ -1658,7 +1703,6 @@ class IS_GENERIC_URL(Validator):
         allowed_schemes=None,
         prepend_scheme=None,
     ):
-
         self.error_message = error_message
         if allowed_schemes is None:
             self.allowed_schemes = all_url_schemes
@@ -1681,7 +1725,7 @@ class IS_GENERIC_URL(Validator):
             value: a string, the URL to validate
 
         Returns:
-            a tuple, where tuple[0] is the inputed value (possible
+            a tuple, where tuple[0] is the inputted value (possible
             prepended with prepend_scheme), and tuple[1] is either
             None (success!) or the string error_message
         """
@@ -3352,7 +3396,7 @@ class IS_HTTP_URL(Validator):
         error_message: a string, the error message to give the end user
             if the URL does not validate
         allowed_schemes: a list containing strings or None. Each element
-            is a scheme the inputed URL is allowed to use
+            is a scheme the inputted URL is allowed to use
         prepend_scheme: a string, this scheme is prepended if it's
             necessary to make the URL valid
     """
@@ -3367,7 +3411,6 @@ class IS_HTTP_URL(Validator):
         prepend_scheme="http",
         allowed_tlds=None,
     ):
-
         self.error_message = error_message
         if allowed_schemes is None:
             self.allowed_schemes = http_schemes
@@ -3397,7 +3440,7 @@ class IS_HTTP_URL(Validator):
             value: a string, the URL to validate
 
         Returns:
-            a tuple, where tuple[0] is the inputed value
+            a tuple, where tuple[0] is the inputted value
             (possible prepended with prepend_scheme), and tuple[1] is either
             None (success!) or the string error_message
         """
@@ -3496,7 +3539,7 @@ class IS_URL(Validator):
         error_message: a string, the error message to give the end user
             if the URL does not validate
         allowed_schemes: a list containing strings or None. Each element
-            is a scheme the inputed URL is allowed to use
+            is a scheme the inputted URL is allowed to use
         prepend_scheme: a string, this scheme is prepended if it's
             necessary to make the URL valid
 
@@ -3539,7 +3582,6 @@ class IS_URL(Validator):
         prepend_scheme="http",
         allowed_tlds=None,
     ):
-
         self.error_message = error_message
         self.mode = mode.lower()
         if self.mode not in ["generic", "http"]:
@@ -3761,7 +3803,7 @@ class IS_DATETIME(Validator):
             ("%M", "30"),
             ("%S", "59"),
         )
-        for (a, b) in code:
+        for a, b in code:
             format = format.replace(a, b)
         return dict(format=format)
 
@@ -3781,9 +3823,9 @@ class IS_DATETIME(Validator):
             return value
         try:
             if self.format == self.isodatetime:
-                value = value.replace('T', ' ')
+                value = value.replace("T", " ")
                 if len(value) == 16:
-                    value += ':00'
+                    value += ":00"
             (y, m, d, hh, mm, ss, t0, t1, t2) = time.strptime(value, str(self.format))
             value = datetime.datetime(y, m, d, hh, mm, ss)
             if self.timezone is not None:
@@ -4418,7 +4460,9 @@ class CRYPT(Validator):
         True
         >>> CRYPT(digest_alg='md5',salt=False)('test')[0] == a[6:]
         True
-        """
+    """
+
+    STARS = "******"
 
     def __init__(
         self,
@@ -4444,12 +4488,17 @@ class CRYPT(Validator):
         self.salt = salt
 
     def validate(self, value, record_id=None):
+        if value == self.STARS:
+            return None
         v = value and str(value)[: self.max_length]
         if not v or len(v) < self.min_length:
             raise ValidationError(self.translator(self.error_message))
         if isinstance(value, LazyCrypt):
             return value
         return LazyCrypt(self, value)
+
+    def formatter(self, value):
+        return self.STARS
 
 
 #  entropy calculator for IS_STRONG
@@ -4463,7 +4512,7 @@ otherset = frozenset(b"".join(chr(x) if PY2 else chr(x).encode() for x in range(
 
 
 def calc_entropy(string):
-    """ calculates a simple entropy for a given string """
+    """calculates a simple entropy for a given string"""
     alphabet = 0  # alphabet size
     other = set()
     seen = set()
@@ -4631,6 +4680,7 @@ class IS_STRONG(Validator):
                 numbers = "number"
                 if self.number > 1:
                     numbers = "numbers"
+                numbers = self.translator(numbers)
                 if not len(all_number) >= self.number:
                     failures.append(
                         self.translator("Must include at least %s %s")
@@ -4701,7 +4751,6 @@ class IS_IMAGE(Validator):
         aspectratio=(-1, -1),
         error_message="Invalid image",
     ):
-
         self.extensions = extensions
         self.maxsize = maxsize
         self.minsize = minsize
@@ -5074,7 +5123,6 @@ class IS_IPV4(Validator):
         is_automatic=None,
         error_message="Enter valid IPv4 address",
     ):
-
         for n, value in enumerate((minip, maxip)):
             temp = []
             if isinstance(value, str):
@@ -5225,7 +5273,6 @@ class IS_IPV6(Validator):
         subnets=None,
         error_message="Enter valid IPv6 address",
     ):
-
         self.is_private = is_private
         self.is_link_local = is_link_local
         self.is_reserved = is_reserved
@@ -5442,7 +5489,6 @@ class IS_IPADDRESS(Validator):
         is_ipv6=None,
         error_message="Enter valid IP address",
     ):
-
         self.minip = (minip,)
         self.maxip = (maxip,)
         self.invert = invert

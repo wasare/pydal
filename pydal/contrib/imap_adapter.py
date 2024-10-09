@@ -3,20 +3,20 @@ import datetime
 import re
 import sys
 
-from .._globals import IDENTITY, GLOBAL_LOCKER
-from .._compat import PY2, integer_types, basestring
+from .._compat import PY2, basestring, integer_types
+from .._globals import GLOBAL_LOCKER, IDENTITY
+from ..adapters.base import NoSQLAdapter
 from ..connection import ConnectionPool
-from ..objects import Field, Query, Expression
 from ..helpers.classes import SQLALL
 from ..helpers.methods import use_common_filters
-from ..adapters.base import NoSQLAdapter
+from ..objects import Expression, Field, Query
 
 long = integer_types[-1]
 
 
 class IMAPAdapter(NoSQLAdapter):
 
-    """ IMAP server adapter
+    """IMAP server adapter
 
     This class is intended as an interface with
     email IMAP servers to perform simple queries in the
@@ -178,7 +178,6 @@ class IMAPAdapter(NoSQLAdapter):
         adapter_args={},
         after_connection=None,
     ):
-
         super(IMAPAdapter, self).__init__(
             db=db,
             uri=uri,
@@ -407,7 +406,7 @@ class IMAPAdapter(NoSQLAdapter):
         return text
 
     def encode_text(self, text, charset, errors="replace"):
-        """ convert text for mail to unicode"""
+        """convert text for mail to unicode"""
         if text is None:
             text = ""
         if PY2:
@@ -429,7 +428,7 @@ class IMAPAdapter(NoSQLAdapter):
         return charset
 
     def get_mailboxes(self):
-        """ Query the mail database for mailbox names """
+        """Query the mail database for mailbox names"""
         if self.static_names:
             # statically defined mailbox names
             self.connection.mailbox_names = self.static_names
@@ -549,11 +548,15 @@ class IMAPAdapter(NoSQLAdapter):
         pass
 
     def select(self, query, fields, attributes):
-        """  Searches and Fetches records and return web2py rows
-        """
+        """Searches and Fetches records and return web2py rows"""
         # move this statement elsewhere (upper-level)
         if use_common_filters(query):
-            query = self.common_filter(query, [self.get_query_mailbox(query),])
+            query = self.common_filter(
+                query,
+                [
+                    self.get_query_mailbox(query),
+                ],
+            )
 
         import email
 
@@ -878,7 +881,12 @@ class IMAPAdapter(NoSQLAdapter):
         rowcount = 0
         tablename = table._dalname
         if use_common_filters(query):
-            query = self.common_filter(query, [tablename,])
+            query = self.common_filter(
+                query,
+                [
+                    tablename,
+                ],
+            )
         mark = []
         unmark = []
         if query:
@@ -922,7 +930,12 @@ class IMAPAdapter(NoSQLAdapter):
         tablename = self.get_query_mailbox(query)
         if query and tablename is not None:
             if use_common_filters(query):
-                query = self.common_filter(query, [tablename,])
+                query = self.common_filter(
+                    query,
+                    [
+                        tablename,
+                    ],
+                )
             result, data = self.connection.select(
                 self.connection.mailbox_names[tablename]
             )
@@ -939,7 +952,12 @@ class IMAPAdapter(NoSQLAdapter):
         tablename = table._dalname
         if query:
             if use_common_filters(query):
-                query = self.common_filter(query, [tablename,])
+                query = self.common_filter(
+                    query,
+                    [
+                        tablename,
+                    ],
+                )
             result, data = self.connection.select(
                 self.connection.mailbox_names[tablename]
             )

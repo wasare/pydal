@@ -1,8 +1,8 @@
 import unittest
 
 from pydal import DAL, Field
+from pydal.restapi import ALLOW_ALL_POLICY, DENY_ALL_POLICY, RestAPI, __version__
 from pydal.validators import IS_NOT_IN_DB
-from pydal.restapi import RestAPI, ALLOW_ALL_POLICY, DENY_ALL_POLICY, __version__
 
 
 class TestRestAPI(unittest.TestCase):
@@ -184,11 +184,11 @@ class TestRestAPI(unittest.TestCase):
             {
                 "count": 5,
                 "items": [
-                    {"name": "Chair", "color_name": "red", "id": 1},
-                    {"name": "Chair", "color_name": "green", "id": 2},
-                    {"name": "Table", "color_name": "red", "id": 3},
-                    {"name": "Table", "color_name": "blue", "id": 4},
-                    {"name": "Lamp", "color_name": "green", "id": 5},
+                    {"name": "Chair", "color.name": "red", "id": 1},
+                    {"name": "Chair", "color.name": "green", "id": 2},
+                    {"name": "Table", "color.name": "red", "id": 3},
+                    {"name": "Table", "color.name": "blue", "id": 4},
+                    {"name": "Lamp", "color.name": "green", "id": 5},
                 ],
             },
         )
@@ -326,7 +326,6 @@ class TestRestAPI(unittest.TestCase):
         )
 
     def test_REST(self):
-
         api = self.api
         api.policy = ALLOW_ALL_POLICY
 
@@ -388,7 +387,6 @@ class TestRestAPI(unittest.TestCase):
         )
 
     def test_policies(self):
-
         api = self.api
         api.policy = DENY_ALL_POLICY
 

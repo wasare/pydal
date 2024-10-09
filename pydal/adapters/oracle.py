@@ -1,12 +1,13 @@
+import os
 import re
 import sys
-import os
+
 from .._compat import integer_types, long
 from ..helpers.classes import Reference
 from ..helpers.methods import use_common_filters
-from .base import SQLAdapter
-from ..objects import Table, Field, Expression, Query
+from ..objects import Expression, Field, Query, Table
 from . import adapters, with_connection, with_connection_or_raise
+from .base import SQLAdapter
 
 
 @adapters.register_for("oracle")
@@ -14,11 +15,12 @@ class Oracle(SQLAdapter):
     dbengine = "oracle"
     drivers = ("cx_Oracle",)
 
-    cmd_fix = re.compile("[^']*('[^']*'[^']*)*\:(?P<clob>(C|B)LOB\('([^']+|'')*'\))")
-
-    def _initialize_(self, do_connect):
-        super(Oracle, self)._initialize_(do_connect)
+    def _initialize_(self):
+        super(Oracle, self)._initialize_()
         self.ruri = self.uri.split("://", 1)[1]
+        self.REGEX_CLOB = re.compile(
+            r"[^']*('[^']*'[^']*)*\:(?P<clob>(C|B)LOB\('([^']|'')*'\))"
+        )
         if "threaded" not in self.driver_args:
             self.driver_args["threaded"] = True
         # set character encoding defaults
@@ -151,7 +153,7 @@ class Oracle(SQLAdapter):
         return self._expand(expression, field_type, colnames, query_env)
 
     def _build_value_for_insert(self, field, value, r_values):
-        if field.type is "text":
+        if field.type == "text":
             _rname = (field._rname[1] == '"') and field._rname[1:-1] or field._rname
             r_values[_rname] = value
             return ":" + _rname
@@ -222,7 +224,7 @@ class Oracle(SQLAdapter):
         return rid
 
     def _regex_select_as_parser(self, colname):
-        return re.compile('\s+"(\S+)"').search(colname)
+        return re.compile(r'\s+"(\S+)"').search(colname)
 
     def parse(self, rows, fields, colnames, blob_decode=True, cacheable=False):
         if len(rows) and len(rows[0]) == len(fields) + 1 and type(rows[0][-1]) == int:
