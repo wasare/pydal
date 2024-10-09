@@ -71,4 +71,4 @@ pyDAL supports the following databases:
 
 pyDAL is released under the BSD-3c License.  For further details, please check the `LICENSE` file.
 
-Forked from web2py/paydal
+Forked from web2py/paydal - updates
